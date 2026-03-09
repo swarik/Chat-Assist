@@ -34,7 +34,7 @@ static std::string get_home_dir() {
 #define SYSTEM_PROMPT_FILE  (get_home_dir() + "/tmp/system_prompt.txt")
 #define READLINE_HIST_FILE  (get_home_dir() + "/tmp/.chat_readline_history")
 #define CMD_TIMEOUT         45
-#define MAX_CMD_OUTPUT      160000
+#define MAX_CMD_OUTPUT      16000
 #define MAX_MESSAGES        80
 #define DEFAULT_TEMPERATURE 0.7
 #define DEFAULT_MAX_TOKENS  40960
@@ -43,7 +43,17 @@ static std::string get_home_dir() {
 struct ChatSession {
     std::vector<json> messages;
     std::string       history_file   = HISTORY_FILE;
-    std::string       model          = "anthropic/claude-sonnet-4";
+
+   std::string       model          = "anthropic/claude-sonnet-4";
+ //std::string       model          = "openai/gpt-5.2";
+ //std::string       model          = "google/gemini-3.1-pro-preview";
+ //std::string       model          = "x-ai/grok-4";
+ //std::string       model          = "qwen/qwen3-max-thinking";
+ //std::string       model          = "xiaomi/mimo-v2-flash";
+ //std::string       model          = "nex-agi/deepseek-v3.1-nex-n1";
+ //std::string       model          = "anthropic/claude-opus-4.6";
+ //std::string       model          = "anthropic/claude-sonnet-4.6";
+
     std::string       sys_prompt;
     double            temperature    = DEFAULT_TEMPERATURE;
     int               max_tokens     = DEFAULT_MAX_TOKENS;
@@ -375,7 +385,7 @@ std::string do_api_request() {
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER,    headers);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA,     &readBuffer);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT,       180L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT,       100L);
 
     CURLcode res = curl_easy_perform(curl);
 
