@@ -44,7 +44,7 @@ struct ChatSession {
     std::vector<json> messages;
     std::string       history_file   = HISTORY_FILE;
 
-   std::string       model          = "anthropic/claude-sonnet-4";
+    std::string       model          = "anthropic/claude-sonnet-4";
  //std::string       model          = "openai/gpt-5.2";
  //std::string       model          = "google/gemini-3.1-pro-preview";
  //std::string       model          = "x-ai/grok-4";
