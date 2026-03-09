@@ -33,7 +33,7 @@ static std::string get_home_dir() {
 #define HISTORY_FILE        (get_home_dir() + "/tmp/chat_history.json")
 #define SYSTEM_PROMPT_FILE  (get_home_dir() + "/tmp/system_prompt.txt")
 #define READLINE_HIST_FILE  (get_home_dir() + "/tmp/.chat_readline_history")
-#define CMD_TIMEOUT         45
+#define CMD_TIMEOUT         100
 #define MAX_CMD_OUTPUT      16000
 #define MAX_MESSAGES        80
 #define DEFAULT_TEMPERATURE 0.7
@@ -44,7 +44,8 @@ struct ChatSession {
     std::vector<json> messages;
     std::string       history_file   = HISTORY_FILE;
 
-    std::string       model          = "anthropic/claude-sonnet-4";
+    std::string       model          = "minimax/minimax-m2.5";
+ //std::string       model          = "anthropic/claude-sonnet-4";
  //std::string       model          = "openai/gpt-5.2";
  //std::string       model          = "google/gemini-3.1-pro-preview";
  //std::string       model          = "x-ai/grok-4";
@@ -256,7 +257,14 @@ std::string for_com_parse(const std::string &content) {
     std::string com_cont = content.substr(cnt_start + open_tag.size(),
                                           cnt_end - (cnt_start + open_tag.size()));
 
-    std::cout << C_YELLOW << "[Выполняю команду...]" << C_RESET << std::endl;
+    std::cout << C_YELLOW << "[Выполнить команду? (y/n|д/н)]: " << C_RESET << std::flush;
+    std::string confirm;
+    if (!std::getline(std::cin, confirm)) return "";
+    if (confirm != "y" && confirm != "Y" && confirm != "д" && confirm != "Д") {
+        std::cout << C_RED << "[Выполнение отменено пользователем]" << C_RESET << std::endl;
+        return "";
+    }
+    std::cout << C_YELLOW << "[Выполняю...]" << C_RESET << std::endl;
     std::string result = exec_with_timeout(com_cont, CMD_TIMEOUT);
     std::cout << C_BLUE << "[Результат]:\n" << result << C_RESET << std::endl;
     return result;
