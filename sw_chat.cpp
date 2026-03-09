@@ -33,11 +33,11 @@ static std::string get_home_dir() {
 #define HISTORY_FILE        (get_home_dir() + "/tmp/chat_history.json")
 #define SYSTEM_PROMPT_FILE  (get_home_dir() + "/tmp/system_prompt.txt")
 #define READLINE_HIST_FILE  (get_home_dir() + "/tmp/.chat_readline_history")
-#define CMD_TIMEOUT         100
-#define MAX_CMD_OUTPUT      16000
-#define MAX_MESSAGES        80
+#define CMD_TIMEOUT         150
+#define MAX_CMD_OUTPUT      96000
+#define MAX_MESSAGES        480
 #define DEFAULT_TEMPERATURE 0.7
-#define DEFAULT_MAX_TOKENS  40960
+#define DEFAULT_MAX_TOKENS  120000
 
 // ─────────────────────────── Глобальное состояние ────────────
 struct ChatSession {

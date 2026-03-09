@@ -1,7 +1,5 @@
-.chat_readline_history
-1
-chat_history.json
-nlohmann/
-testo.cpp
-1.cpp.back
-1.cpp.bak
+# Игнорировать всё в этой папке
+*
+
+# Кроме файла sw_chat.cpp
+!sw_chat.cpp
