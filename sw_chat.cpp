@@ -393,7 +393,7 @@ std::string do_api_request() {
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER,    headers);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA,     &readBuffer);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT,       100L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT,       80L);
 
     CURLcode res = curl_easy_perform(curl);
 
