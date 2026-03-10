@@ -33,7 +33,7 @@ static std::string get_home_dir() {
 #define HISTORY_FILE        (get_home_dir() + "/tmp/chat_history.json")
 #define SYSTEM_PROMPT_FILE  (get_home_dir() + "/tmp/system_prompt.txt")
 #define READLINE_HIST_FILE  (get_home_dir() + "/tmp/.chat_readline_history")
-#define CMD_TIMEOUT         150
+#define CMD_TIMEOUT         85
 #define MAX_CMD_OUTPUT      96000
 #define MAX_MESSAGES        480
 #define DEFAULT_TEMPERATURE 0.7
@@ -596,7 +596,9 @@ int main() {
             "Используй максимально аккуратно, чтобы не навредить системе. "
             "Всегда придерживайся правила: только одна вставка на bash может быть в твоем ответе. "
             "Все инструкции, что указаны здесь выше ты должен постоянно помнить и не нарушать. "
-            "ЭТО ВАЖНО! Результат выполнения команды будет добавлен к твоему сообщению автоматически.";
+            "ЭТО ВАЖНО! Результат выполнения команды будет добавлен к твоему сообщению автоматически."
+            "В папке ~/tmp возможно будет файл memo.md это твоя память"
+            "Если необходимо сделать запись в memo.md, то сохраняй самое важное, максимум три - пять строк, ДОПИСЫВАЯ в файл.";
     }
     // Системный промпт с правильной ролью "system"
     G.messages.push_back({{"role", "system"}, {"content", G.sys_prompt}});
