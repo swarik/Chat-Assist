@@ -4,6 +4,8 @@
 #include <string>
 #include <vector>
 #include <signal.h>
+#include <unistd.h>
+#include <sstream>
 #include <readline/readline.h>
 #include <readline/history.h>
 #include <curl/curl.h>
@@ -112,6 +114,76 @@ static size_t WriteCallback(void *contents, size_t size, size_t nmemb, std::stri
     s->append((char*)contents, size * nmemb);
     return size * nmemb;
 }
+
+// ─────────────────────────── Streaming SSE ───────────────────
+struct StreamContext {
+    std::string buffer;        // буфер для неполных SSE-строк
+    std::string full_content;  // собранный полный ответ
+    int         prompt_tokens     = 0;
+    int         completion_tokens = 0;
+    bool        first_token       = true;
+    bool        done              = false;
+};
+
+static size_t StreamCallback(void *contents, size_t size, size_t nmemb, void *userp) {
+    StreamContext *ctx = static_cast<StreamContext*>(userp);
+    std::string chunk((char*)contents, size * nmemb);
+    ctx->buffer += chunk;
+
+    // Обрабатываем построчно
+    std::string::size_type pos;
+    while ((pos = ctx->buffer.find("\n")) != std::string::npos) {
+        std::string line = ctx->buffer.substr(0, pos);
+        ctx->buffer.erase(0, pos + 1);
+
+        // Убираем \r если есть
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+
+        // Пустые строки — разделители SSE
+        if (line.empty()) continue;
+
+        // Финальный маркер
+        if (line == "data: [DONE]") {
+            ctx->done = true;
+            continue;
+        }
+
+        // Парсим "data: {...}"
+        if (line.rfind("data: ", 0) != 0) continue;
+        std::string json_str = line.substr(6);
+
+        try {
+            json j = json::parse(json_str);
+
+            // Извлекаем дельту контента
+            if (j.contains("choices") && !j["choices"].empty()) {
+                auto &choice = j["choices"][0];
+                if (choice.contains("delta") && choice["delta"].contains("content")) {
+                    std::string token = choice["delta"]["content"];
+                    if (!token.empty()) {
+                        if (ctx->first_token) {
+                            std::cout << C_BOLD << C_CYAN << "\n[Ассистент]:" << C_RESET << std::endl;
+                            ctx->first_token = false;
+                        }
+                        std::cout << token << std::flush;
+                        ctx->full_content += token;
+                    }
+                }
+            }
+
+            // Извлекаем usage если есть (обычно в последнем чанке)
+            if (j.contains("usage")) {
+                ctx->prompt_tokens     = j["usage"].value("prompt_tokens", 0);
+                ctx->completion_tokens = j["usage"].value("completion_tokens", 0);
+            }
+        } catch (...) {
+            // Некорректный JSON — пропускаем
+        }
+    }
+
+    return size * nmemb;
+}
+
 
 // ─────────────────────────── История ─────────────────────────
 void save_history() {
@@ -276,6 +348,124 @@ void print_assistant(const std::string &content) {
     std::cout << content << std::endl;
 }
 
+// --- Markdown rendering ---
+#define C_ITALIC    "\033[3m"
+#define C_BG_GRAY   "\033[48;5;236m"
+#define C_WHITE     "\033[97m"
+#define C_CODE_FG   "\033[93m"
+#define C_QUOTE     "\033[36;3m"
+#define C_BULLET    "\033[33m"
+#define C_H1        "\033[1;35m"
+#define C_H2        "\033[1;36m"
+#define C_H3        "\033[1;33m"
+
+static std::string render_inline_md(const std::string &line) {
+    std::string out;
+    out.reserve(line.size() * 2);
+    size_t i = 0, len = line.size();
+    while (i < len) {
+        if (line[i] == '`' && (i+1 < len) && line[i+1] != '`') {
+            size_t end = line.find('`', i+1);
+            if (end != std::string::npos) {
+                out += C_BG_GRAY; out += C_CODE_FG;
+                out += line.substr(i+1, end-i-1);
+                out += C_RESET;
+                i = end + 1; continue;
+            }
+        }
+        if (i+1 < len && line[i] == '*' && line[i+1] == '*') {
+            size_t end = line.find("**", i+2);
+            if (end != std::string::npos) {
+                out += C_BOLD;
+                out += line.substr(i+2, end-i-2);
+                out += C_RESET;
+                i = end + 2; continue;
+            }
+        }
+        if (i+1 < len && line[i] == '_' && line[i+1] == '_') {
+            size_t end = line.find("__", i+2);
+            if (end != std::string::npos) {
+                out += C_BOLD;
+                out += line.substr(i+2, end-i-2);
+                out += C_RESET;
+                i = end + 2; continue;
+            }
+        }
+        if (line[i] == '*' && (i+1 >= len || line[i+1] != '*')) {
+            size_t end = line.find('*', i+1);
+            if (end != std::string::npos && end > i+1) {
+                out += C_ITALIC;
+                out += line.substr(i+1, end-i-1);
+                out += C_RESET;
+                i = end + 1; continue;
+            }
+        }
+        out += line[i]; ++i;
+    }
+    return out;
+}
+
+static void render_markdown(const std::string &text) {
+    std::istringstream ss(text);
+    std::string line;
+    bool in_code = false;
+    while (std::getline(ss, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.size() >= 3 && line.substr(0,3) == "```") {
+            if (!in_code) {
+                in_code = true;
+                std::string lang = line.size() > 3 ? line.substr(3) : "code";
+                while (!lang.empty() && lang[0]==' ') lang.erase(0,1);
+                if (lang.empty()) lang = "code";
+                std::cout << C_GRAY << "\xe2\x94\x8c\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80 " << lang << " \xe2\x94\x80\xe2\x94\x80\xe2\x94\x80" << C_RESET << std::endl;
+            } else {
+                in_code = false;
+                std::cout << C_GRAY << "\xe2\x94\x94\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80" << C_RESET << std::endl;
+            }
+            continue;
+        }
+        if (in_code) {
+            std::cout << C_GRAY << "\xe2\x94\x82 " << C_WHITE << line << C_RESET << std::endl;
+            continue;
+        }
+        if (line.size()>=4 && line.substr(0,4)=="### ") { std::cout << C_H3 << "  \xe2\x96\xb8 " << line.substr(4) << C_RESET << std::endl; continue; }
+        if (line.size()>=3 && line.substr(0,3)=="## ")  { std::cout << C_H2 << " \xe2\x96\xb8 " << line.substr(3) << C_RESET << std::endl; continue; }
+        if (line.size()>=2 && line.substr(0,2)=="# ")   { std::cout << C_H1 << "\xe2\x96\xb8 " << line.substr(2) << C_RESET << std::endl; continue; }
+        if (!line.empty() && line[0]=='>') {
+            std::string c = line.size()>1 ? line.substr(1) : "";
+            if (!c.empty() && c[0]==' ') c.erase(0,1);
+            std::cout << C_QUOTE << "  \xe2\x94\x83 " << c << C_RESET << std::endl;
+            continue;
+        }
+        if (line.size()>=3) {
+            bool hr = true; char ch = line[0];
+            if (ch=='-'||ch=='*'||ch=='_') { for (char x:line) if(x!=ch&&x!=' '){hr=false;break;} } else hr=false;
+            if (hr) { std::cout << C_GRAY << "  \xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80" << C_RESET << std::endl; continue; }
+        }
+        if (line.size()>=2 && (line[0]=='-'||line[0]=='*') && line[1]==' ') {
+            std::cout << C_BULLET << "  \xe2\x80\xa2 " << C_RESET << render_inline_md(line.substr(2)) << std::endl;
+            continue;
+        }
+        { size_t p=0; while(p<line.size()&&line[p]>='0'&&line[p]<='9') ++p;
+          if (p>0&&p<line.size()&&line[p]=='.'&&p+1<line.size()&&line[p+1]==' ') {
+            std::cout << C_BULLET << "  " << line.substr(0,p) << ". " << C_RESET << render_inline_md(line.substr(p+2)) << std::endl;
+            continue;
+          }
+        }
+        if (line.size()>=4) {
+            size_t sp=0; while(sp<line.size()&&line[sp]==' ') ++sp;
+            if (sp>=2 && sp<line.size() && (line[sp]=='-'||line[sp]=='*') && sp+1<line.size() && line[sp+1]==' ') {
+                std::string ind(sp/2, ' ');
+                std::cout << C_BULLET << "  " << ind << "\xe2\x97\xa6 " << C_RESET << render_inline_md(line.substr(sp+2)) << std::endl;
+                continue;
+            }
+        }
+        std::cout << render_inline_md(line) << std::endl;
+    }
+    if (in_code) std::cout << C_GRAY << "\xe2\x94\x94\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80" << C_RESET << std::endl;
+}
+
+
 // ─────────────────────────── Сигналы ─────────────────────────
 void signal_handler(int /*sig*/) {
     g_exit_requested = 1;
@@ -364,11 +554,13 @@ void cmd_delete(const std::string &arg) {
 }
 
 // ─────────────────────────── API запрос ──────────────────────
+// do_api_request — streaming version, returns full content or empty on error
+// Also updates G.total_prompt_tokens / G.total_completion_tokens
+// Returns special JSON-like string for backward compat or empty
 std::string do_api_request() {
     std::string api_key = get_api_key();
     if (api_key.empty()) return "";
 
-    std::string readBuffer;
     CURL *curl = curl_easy_init();
     if (!curl) return "";
 
@@ -378,22 +570,26 @@ std::string do_api_request() {
         {"model",       G.model},
         {"messages",    G.messages},
         {"temperature", G.temperature},
-        {"max_tokens",  G.max_tokens}
+        {"max_tokens",  G.max_tokens},
+        {"stream",      true}
     };
     std::string jsonData = jData.dump(-1, ' ', false, json::error_handler_t::replace);
 
     struct curl_slist *headers = nullptr;
     headers = curl_slist_append(headers, "Content-Type: application/json");
+    headers = curl_slist_append(headers, "Accept: text/event-stream");
     std::string auth = "Authorization: Bearer " + api_key;
     headers = curl_slist_append(headers, auth.c_str());
+
+    StreamContext sctx;
 
     curl_easy_setopt(curl, CURLOPT_URL, "https://openrouter.ai/api/v1/chat/completions");
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS,    jsonData.c_str());
     curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)jsonData.size());
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER,    headers);
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA,     &readBuffer);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT,       80L);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, StreamCallback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA,     &sctx);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT,       120L);
 
     CURLcode res = curl_easy_perform(curl);
 
@@ -407,13 +603,37 @@ std::string do_api_request() {
         std::cerr << C_RED << "curl failed: " << curl_easy_strerror(res) << C_RESET << std::endl;
         return "";
     }
+
+    // При ошибке HTTP стриминг мог не начаться — sctx.full_content содержит тело ошибки
     if (http_code != 200) {
+        // Попробуем показать ошибку
+        std::string err_text = sctx.full_content.empty() ? sctx.buffer : sctx.full_content;
         std::cerr << C_RED << "[HTTP " << http_code << "] "
-                  << readBuffer.substr(0, std::min((size_t)300, readBuffer.size()))
+                  << err_text.substr(0, std::min((size_t)500, err_text.size()))
                   << C_RESET << std::endl;
         return "";
     }
-    return readBuffer;
+
+    // Завершающий перевод строки после стриминга
+    if (!sctx.full_content.empty()) {
+        std::cout << "\n" << std::endl;
+        // Рендерим markdown-версию
+        std::cout << C_GRAY << "\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80 rendered \xe2\x94\x80\xe2\x94\x80\xe2\x94\x80" << C_RESET << std::endl;
+        render_markdown(sctx.full_content);
+    }
+
+    // Обновляем счётчики токенов
+    G.total_prompt_tokens     += sctx.prompt_tokens;
+    G.total_completion_tokens += sctx.completion_tokens;
+
+    // Возвращаем специальный маркер — content уже выведен на экран
+    // Формируем pseudo-JSON для process_api_response
+    if (sctx.full_content.empty()) return "";
+
+    json result = {
+        {"choices", json::array({{{"message", {{"content", sctx.full_content}}}}})}
+    };
+    return result.dump();
 }
 
 // ─────────────────────────── Обработка ответа ────────────────
@@ -432,14 +652,8 @@ bool process_api_response(const std::string &rawResponse) {
             return false;
         }
 
-        // Учёт токенов
-        if (j.contains("usage")) {
-            G.total_prompt_tokens     += j["usage"].value("prompt_tokens",     0);
-            G.total_completion_tokens += j["usage"].value("completion_tokens", 0);
-        }
-
         std::string content = j["choices"][0]["message"]["content"];
-        print_assistant(content);
+        // Контент уже выведен стримингом, не дублируем
 
         // Парсинг bash-команды (content НЕ модифицируется)
         std::string cmd_result = for_com_parse(content);
@@ -459,12 +673,8 @@ bool process_api_response(const std::string &rawResponse) {
                 try {
                     json j2 = json::parse(raw2);
                     if (j2.contains("choices") && !j2["choices"].empty()) {
-                        if (j2.contains("usage")) {
-                            G.total_prompt_tokens     += j2["usage"].value("prompt_tokens",     0);
-                            G.total_completion_tokens += j2["usage"].value("completion_tokens", 0);
-                        }
                         std::string content2 = j2["choices"][0]["message"]["content"];
-                        print_assistant(content2);
+                        // Контент уже выведен стримингом
 
                         std::string cmd_result2 = for_com_parse(content2);
                         G.messages.push_back({{"role", "assistant"}, {"content", content2}});
@@ -578,7 +788,7 @@ static std::string command_arg(const std::string &userAnswer, const std::string 
 }
 
 // ─────────────────────────── main ────────────────────────────
-int main() {
+int main(int argc, char *argv[]) {
     signal(SIGINT,  signal_handler);
     signal(SIGTERM, signal_handler);
 
@@ -604,13 +814,54 @@ int main() {
     // Системный промпт с правильной ролью "system"
     G.messages.push_back({{"role", "system"}, {"content", G.sys_prompt}});
 
-    // Загрузка истории readline между сессиями
+    curl_global_init(CURL_GLOBAL_ALL);
+
+    // ── Режим пайпа: stdin не терминал или есть аргументы ──
+    bool pipe_mode = !isatty(fileno(stdin));
+    bool has_args  = argc > 1;
+
+    if (pipe_mode || has_args) {
+        std::string message;
+        if (has_args) {
+            for (int i = 1; i < argc; ++i) {
+                if (i > 1) message += " ";
+                message += argv[i];
+            }
+        }
+        if (pipe_mode) {
+            std::string pipe_data, pline;
+            while (std::getline(std::cin, pline)) {
+                if (!pipe_data.empty()) pipe_data += "\n";
+                pipe_data += pline;
+            }
+            if (!pipe_data.empty()) {
+                if (!message.empty()) message += "\n\n";
+                message += pipe_data;
+            }
+        }
+        if (message.empty()) {
+            std::cerr << C_RED << "[Нет данных]" << C_RESET << std::endl;
+            curl_global_cleanup();
+            return 1;
+        }
+        G.messages.push_back({{"role", "user"}, {"content", message}});
+        std::string raw = do_api_request();
+        std::cout << std::endl;
+        curl_global_cleanup();
+        return 0;
+    }
+
+    // ── Интерактивный режим ──
+    std::cout << C_BOLD << C_CYAN << "=== Chat CLI ===" << C_RESET << std::endl;
+    std::cout << C_YELLOW << "Модель: " << G.model << C_RESET << std::endl;
+    std::cout << C_YELLOW << "Введите /help для справки" << C_RESET << std::endl;
+    std::cout << C_GRAY   << "Подсказка: Enter — новая строка, '//' — отправить сообщение"
+              << C_RESET << std::endl;
+
     using_history();
     read_history(READLINE_HIST_FILE.c_str());
 
-    curl_global_init(CURL_GLOBAL_ALL);
-
-    // ── Главный цикл: сначала ввод, потом запрос ──
+    // ── Главный цикл ──
     while (true) {
         if (g_exit_requested) do_exit();
 
