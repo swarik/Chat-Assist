@@ -54,8 +54,8 @@ struct ChatSession {
  //std::string       model          = "qwen/qwen3-max-thinking";
  //std::string       model          = "xiaomi/mimo-v2-flash";
  //std::string       model          = "nex-agi/deepseek-v3.1-nex-n1";
- std::string       model          = "anthropic/claude-opus-4.6";
- //std::string       model          = "anthropic/claude-sonnet-4.6";
+ //std::string       model          = "anthropic/claude-opus-4.6";
+ std::string       model          = "anthropic/claude-sonnet-4.6";
 
     std::string       sys_prompt;
     double            temperature    = DEFAULT_TEMPERATURE;
@@ -117,12 +117,13 @@ static size_t WriteCallback(void *contents, size_t size, size_t nmemb, std::stri
 
 // ─────────────────────────── Streaming SSE ───────────────────
 struct StreamContext {
-    std::string buffer;        // буфер для неполных SSE-строк
-    std::string full_content;  // собранный полный ответ
+    std::string buffer;
+    std::string full_content;
     int         prompt_tokens     = 0;
     int         completion_tokens = 0;
     bool        first_token       = true;
     bool        done              = false;
+    int         lines_printed     = 0;  // кол-во \n выведенных сырым стримингом
 };
 
 static size_t StreamCallback(void *contents, size_t size, size_t nmemb, void *userp) {
@@ -161,11 +162,10 @@ static size_t StreamCallback(void *contents, size_t size, size_t nmemb, void *us
                 if (choice.contains("delta") && choice["delta"].contains("content")) {
                     std::string token = choice["delta"]["content"];
                     if (!token.empty()) {
-                        if (ctx->first_token) {
-                            std::cout << C_BOLD << C_CYAN << "\n[Ассистент]:" << C_RESET << std::endl;
-                            ctx->first_token = false;
-                        }
+                        // Выводим токен сразу — настоящий стриминг
                         std::cout << token << std::flush;
+                        for (char c : token)
+                            if (c == '\n') ctx->lines_printed++;
                         ctx->full_content += token;
                     }
                 }
@@ -614,12 +614,13 @@ std::string do_api_request() {
         return "";
     }
 
-    // Завершающий перевод строки после стриминга
+    // Стриминг уже вывел сырой текст — перерисовываем красиво через render_markdown
     if (!sctx.full_content.empty()) {
-        std::cout << "\n" << std::endl;
-        // Рендерим markdown-версию
-        std::cout << C_GRAY << "\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80 rendered \xe2\x94\x80\xe2\x94\x80\xe2\x94\x80" << C_RESET << std::endl;
+        int lines_up = sctx.lines_printed + 2;
+        std::cout << "\033[" << lines_up << "A\033[J";
+        std::cout << C_BOLD << C_CYAN << "[Ассистент]:" << C_RESET << "\n";
         render_markdown(sctx.full_content);
+        std::cout << std::endl;
     }
 
     // Обновляем счётчики токенов
@@ -712,8 +713,8 @@ static bool get_user_input(std::string &out) {
         if (g_exit_requested) return false;
 
         std::string prompt = first_line
-            ? "\n\033[1m\033[32m> \033[0m"
-            : ("\033[32m" + std::to_string(line_num) + "> \033[0m");
+            ? "\n\001\033[1m\033[32m\002> \001\033[0m\002"
+            : ("\001\033[32m\002" + std::to_string(line_num) + "> \001\033[0m\002");
 
         char *line = readline(prompt.c_str());
 
@@ -791,12 +792,6 @@ static std::string command_arg(const std::string &userAnswer, const std::string 
 int main(int argc, char *argv[]) {
     signal(SIGINT,  signal_handler);
     signal(SIGTERM, signal_handler);
-
-    std::cout << C_BOLD << C_CYAN << "=== Chat CLI ===" << C_RESET << std::endl;
-    std::cout << C_YELLOW << "Модель: " << G.model << C_RESET << std::endl;
-    std::cout << C_YELLOW << "Введите /help для справки" << C_RESET << std::endl;
-    std::cout << C_GRAY   << "Подсказка: Enter — новая строка, '//' — отправить сообщение"
-              << C_RESET << std::endl;
 
     // Загрузка системного промпта
     G.sys_prompt = load_system_prompt();
