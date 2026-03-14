@@ -1,4 +1,6 @@
 #include <iostream>
+#include <sys/ioctl.h>
+#include <unistd.h>
 #include <fstream>
 #include <cstdio>
 #include <string>
@@ -616,7 +618,17 @@ std::string do_api_request() {
 
     // Стриминг уже вывел сырой текст — перерисовываем красиво через render_markdown
     if (!sctx.full_content.empty()) {
-        int lines_up = sctx.lines_printed + 2;
+        struct winsize w;
+        ioctl(STDOUT_FILENO, TIOCGWINSZ, &w);
+        int term_cols = (w.ws_col > 0) ? w.ws_col : 80;
+        int visual_lines = 0;
+        int col = 0;
+        for (char c : sctx.full_content) {
+            if (c == '\n') { visual_lines++; col = 0; }
+            else { col++; if (col >= term_cols) { visual_lines++; col = 0; } }
+        }
+        if (col > 0) visual_lines++;
+        int lines_up = visual_lines + 2;
         std::cout << "\033[" << lines_up << "A\033[J";
         std::cout << C_BOLD << C_CYAN << "[Ассистент]:" << C_RESET << "\n";
         render_markdown(sctx.full_content);
