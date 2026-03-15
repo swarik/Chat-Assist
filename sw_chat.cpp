@@ -59,7 +59,18 @@ struct ChatSession {
     std::vector<json> messages;
     std::string       history_file;
 
-    std::string       model          = "anthropic/claude-sonnet-4.6";
+    std::string       model          = "minimax/minimax-m2.5";
+    //std::string       model          = "anthropic/claude-sonnet-4";
+    //std::string       model          = "openai/gpt-5.2";
+    //std::string       model          = "google/gemini-3.1-pro-preview";
+    //std::string       model          = "x-ai/grok-4";
+    //std::string       model          = "qwen/qwen3-max-thinking";
+    //std::string       model          = "xiaomi/mimo-v2-flash";
+    //std::string       model          = "nex-agi/deepseek-v3.1-nex-n1";
+    //std::string       model          = "anthropic/claude-opus-4.6";
+    //std::string       model          = "anthropic/claude-sonnet-4.6";
+
+
     std::string       sys_prompt;
     double            temperature    = DEFAULT_TEMPERATURE;
     int               max_tokens     = DEFAULT_MAX_TOKENS;
