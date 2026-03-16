@@ -10,6 +10,7 @@
 #include <atomic>
 #include <thread>
 #include <chrono>
+#include <mutex>
 #include <readline/readline.h>
 #include <readline/history.h>
 #include <curl/curl.h>
@@ -45,10 +46,10 @@ static std::string get_home_dir() {
 
 // ─────────────────────────── Константы ───────────────────────
 #define CMD_TIMEOUT         150
-#define MAX_CMD_OUTPUT      96000
+#define MAX_CMD_OUTPUT      196000
 #define MAX_MESSAGES        500
 #define DEFAULT_TEMPERATURE 0.7
-#define DEFAULT_MAX_TOKENS  22000
+#define DEFAULT_MAX_TOKENS  52000
 
 static std::string HISTORY_FILE;
 static std::string SYSTEM_PROMPT_FILE;
@@ -59,6 +60,7 @@ struct ChatSession {
     std::vector<json> messages;
     std::string       history_file;
 
+    //std::string       model          = "nvidia/nemotron-3-super-120b-a12b:free";
     std::string       model          = "minimax/minimax-m2.5";
     //std::string       model          = "anthropic/claude-sonnet-4";
     //std::string       model          = "openai/gpt-5.2";
@@ -86,8 +88,10 @@ static ChatSession G;
 static volatile sig_atomic_t g_exit_requested = 0;
 static volatile sig_atomic_t g_stream_abort   = 0;
 static volatile sig_atomic_t g_in_streaming   = 0; // 1 пока идёт стриминг
+static std::mutex g_stream_mutex;  // Мьютекс для защиты потоков
 
 static void signal_handler(int /*sig*/) {
+    std::lock_guard<std::mutex> lock(g_stream_mutex);
     if (g_in_streaming) {
         // Прерываем только стриминг, не выходим
         g_stream_abort = 1;
@@ -321,7 +325,12 @@ bool load_history() {
     std::ifstream f(G.history_file);
     if (!f.is_open()) return false;
     try {
-        json j = json::parse(f);
+        // Проверка на пустой файл
+        std::string content((std::istreambuf_iterator<char>(f)),
+                            std::istreambuf_iterator<char>());
+        if (content.empty()) return false;
+        
+        json j = json::parse(content);
         G.messages.clear();
         for (auto &m : j) G.messages.push_back(m);
         if (G.messages.empty() || G.messages[0]["role"] != "system") {
@@ -448,7 +457,7 @@ static std::atomic<bool> g_spinner_active{false};
 static void spinner_thread_func(const std::string &model) {
     const char* frames[] = {"⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"};
     int idx = 0;
-    while (g_spinner_active.load()) {
+    while (g_spinner_active.load() && !g_exit_requested) {
         std::cout << "\r" << C_YELLOW << frames[idx % 10]
                   << " Думаю... [" << model << "]  "
                   << C_RESET << std::flush;
@@ -469,8 +478,11 @@ struct StreamContext {
 };
 
 static size_t StreamCallback(void *contents, size_t size, size_t nmemb, void *userp) {
-    // Если запрошено прерывание — останавливаем передачу
-    if (g_stream_abort) return 0; // CURL прервёт с CURLE_WRITE_ERROR
+    // Проверяем запрос прерывания под мьютексом
+    {
+        std::lock_guard<std::mutex> lock(g_stream_mutex);
+        if (g_stream_abort) return 0; // CURL прервёт с CURLE_WRITE_ERROR
+    }
 
     StreamContext *ctx = static_cast<StreamContext*>(userp);
     std::string chunk((char*)contents, size * nmemb);
@@ -533,8 +545,12 @@ std::string do_api_request(bool &aborted) {
 
     StreamContext sctx;
 
-    g_stream_abort = 0;
-    g_in_streaming = 1;
+    // Устанавливаем флаги под мьютексом
+    {
+        std::lock_guard<std::mutex> lock(g_stream_mutex);
+        g_stream_abort = 0;
+        g_in_streaming = 1;
+    }
 
     // Запускаем спиннер
     g_spinner_active.store(true);
@@ -554,17 +570,29 @@ std::string do_api_request(bool &aborted) {
     g_spinner_active.store(false);
     if (spinner_t.joinable()) spinner_t.join();
 
-    g_in_streaming = 0;
+    // Сбрасываем флаги под мьютексом
+    {
+        std::lock_guard<std::mutex> lock(g_stream_mutex);
+        g_in_streaming = 0;
+    }
 
     long http_code = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
     curl_slist_free_all(headers);
     curl_easy_cleanup(curl);
 
-    // Проверяем прерывание пользователем
-    if (g_stream_abort) {
+    // Проверяем прерывание пользователем под мьютексом
+    bool was_aborted = false;
+    {
+        std::lock_guard<std::mutex> lock(g_stream_mutex);
+        if (g_stream_abort) {
+            was_aborted = true;
+            g_stream_abort = 0;
+        }
+    }
+    
+    if (was_aborted) {
         aborted = true;
-        g_stream_abort = 0;
         std::cout << "\n" << C_YELLOW << "[Вывод прерван пользователем]" << C_RESET << std::endl;
         // Возвращаем то что успело накопиться (может быть частичный ответ)
         return sctx.full_content;
@@ -658,9 +686,18 @@ void process_response(const std::string &content, bool aborted) {
 
 // ─────────────────────────── Сигнал / выход ──────────────────
 void do_exit() {
+    g_exit_requested = 1;
+    
+    // Останавливаем спиннер если он активен
+    if (g_spinner_active.load()) {
+        g_spinner_active.store(false);
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    }
+    
     std::cout << "\n" << C_YELLOW << "[Сохраняю историю перед выходом...]" << C_RESET << std::endl;
     save_history();
     write_history(READLINE_HIST_FILE.c_str());
+    curl_global_cleanup();
     std::cout << C_YELLOW << "[Выход.]" << C_RESET << std::endl;
     exit(0);
 }
@@ -851,7 +888,7 @@ int main(int argc, char *argv[]) {
             "Используй максимально аккуратно, чтобы не навредить системе !!! "
             "Всегда придерживайся правила: только одна вставка на bash может быть в твоем ответе. "
             "Все инструкции, что указаны здесь выше ты должен постоянно помнить и не нарушать. "
-            "ЭТО ВАЖНО! Результат выполнения команды будет добавлен к твоему сообщению автоматически. "
+            "ЭТО ВАЖНО! Результат выполнения команды будет добавлено к твоему сообщению автоматически. "
             "Таблицы оформлять табами (TAB), а не markdown-таблицами, т.к. вертикальные столбцы смещаются из-за шрифта. "
             "В папке ~/tmp возможно будет файл memo.md это твоя память. "
             "Если необходимо сделать запись в memo.md, то сохраняй самое важное, максимум три - пять строк, ДОПИСЫВАЯ в файл.";
@@ -934,8 +971,17 @@ int main(int argc, char *argv[]) {
             continue;
         }
         if (userAnswer == "/retry") {
-            if (!G.messages.empty() && G.messages.back()["role"] == "assistant") {
-                G.messages.pop_back();
+            // Ищем последнее сообщение assistant
+            int last_assistant = -1;
+            for (int i = (int)G.messages.size() - 1; i >= 0; --i) {
+                if (G.messages[i]["role"] == "assistant") {
+                    last_assistant = i;
+                    break;
+                }
+            }
+            if (last_assistant > 0) {
+                // Удаляем assistant и всё что после него (включая возможные результаты bash)
+                G.messages.resize(last_assistant);
                 std::cout << C_YELLOW << "[Повтор запроса...]" << C_RESET << std::endl;
             } else {
                 std::cout << C_GRAY << "[Нет ответа ассистента для повтора]"
