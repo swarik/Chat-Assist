@@ -78,6 +78,7 @@ struct ChatSession {
     int               max_tokens     = DEFAULT_MAX_TOKENS;
     int               total_prompt_tokens     = 0;
     int               total_completion_tokens = 0;
+    bool              autorun                 = false;
 };
 
 static ChatSession G;
@@ -176,10 +177,11 @@ static std::string render_inline_md(const std::string &line) {
                 i = end + 2; continue;
             }
         }
-        // *italic*
-        if (line[i] == '*' && (i+1 >= len || line[i+1] != '*')) {
+        // *italic* — skip if space after opening or before closing *
+        if (line[i] == '*' && i+1 < len && line[i+1] != '*' && line[i+1] != ' ') {
             size_t end = line.find('*', i+1);
-            if (end != std::string::npos && end > i+1) {
+            if (end != std::string::npos && end > i+1 && line[end-1] != ' '
+                && (end+1 >= len || line[end+1] != '*')) {
                 out += C_ITALIC;
                 out += line.substr(i+1, end-i-1);
                 out += C_RESET;
@@ -437,14 +439,17 @@ std::string for_com_parse(const std::string &content) {
     std::string com_cont = content.substr(cnt_start + open_tag.size(),
                                           cnt_end - (cnt_start + open_tag.size()));
 
-    // Используем readline вместо getline(cin) — они не должны смешиваться (БАГ 3)
-    char *rl_confirm = readline(C_YELLOW "[Выполнить команду? (y/n|д/н)]: " C_RESET);
-    if (!rl_confirm) return "";
-    std::string confirm(rl_confirm);
-    free(rl_confirm);
-    if (confirm != "y" && confirm != "Y" && confirm != "д" && confirm != "Д") {
-        std::cout << C_RED << "[Выполнение отменено пользователем]" << C_RESET << std::endl;
-        return "";
+    if (!G.autorun) {
+        char *rl_confirm = readline(C_YELLOW "[Выполнить команду? (y/n|д/н)]: " C_RESET);
+        if (!rl_confirm) return "";
+        std::string confirm(rl_confirm);
+        free(rl_confirm);
+        if (confirm != "y" && confirm != "Y" && confirm != "д" && confirm != "Д") {
+            std::cout << C_RED << "[Выполнение отменено пользователем]" << C_RESET << std::endl;
+            return "";
+        }
+    } else {
+        std::cout << C_YELLOW << "[Autorun: выполняю автоматически]" << C_RESET << std::endl;
     }
     // БАГ 8: предупреждаем если в ответе несколько bash-блоков (выполняется только первый)
     {
@@ -489,11 +494,7 @@ struct StreamContext {
 };
 
 static size_t StreamCallback(void *contents, size_t size, size_t nmemb, void *userp) {
-    // Проверяем запрос прерывания под мьютексом
-    {
-        std::lock_guard<std::mutex> lock(g_stream_mutex);
-        if (g_stream_abort) return 0; // CURL прервёт с CURLE_WRITE_ERROR
-    }
+    if (g_stream_abort) return 0;
 
     StreamContext *ctx = static_cast<StreamContext*>(userp);
     std::string chunk((char*)contents, size * nmemb);
@@ -575,10 +576,12 @@ std::string do_api_request(bool &aborted) {
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, StreamCallback);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA,     &sctx);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT,       220L);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 15L);
 
     CURLcode res = curl_easy_perform(curl);
 
-    // Останавливаем спиннер
+    // Останавливаем спиннер (немедленно)
+    g_spinner_stop.store(true);
     g_spinner_active.store(false);
     if (spinner_t.joinable()) spinner_t.join();
 
@@ -616,7 +619,8 @@ std::string do_api_request(bool &aborted) {
     }
 
     if (http_code != 200) {
-        std::string err_text = sctx.full_content.empty() ? sctx.buffer : sctx.full_content;
+        std::string err_text = sctx.full_content + sctx.buffer;
+        if (err_text.empty()) err_text = "(empty response)";
         std::cerr << C_RED << "[HTTP " << http_code << "] "
                   << err_text.substr(0, std::min((size_t)500, err_text.size()))
                   << C_RESET << std::endl;
@@ -626,13 +630,13 @@ std::string do_api_request(bool &aborted) {
     G.total_prompt_tokens     += sctx.prompt_tokens;
     G.total_completion_tokens += sctx.completion_tokens;
 
-    return sctx.full_content;
+    return sanitize_utf8(sctx.full_content);
 }
 
 // ─────────────────────────── Обработка ответа ────────────────
 // Выводит ответ красиво, обрабатывает bash-команды
 // aborted — если ответ был прерван, не добавляем его в историю
-void process_response(const std::string &content, bool aborted) {
+void process_response(const std::string &content, bool aborted, size_t msgs_before = 0) {
     if (content.empty()) return;
 
     // Красивый вывод
@@ -641,14 +645,15 @@ void process_response(const std::string &content, bool aborted) {
     std::cout << std::endl;
 
     if (aborted) {
-        // Частичный ответ — спрашиваем что делать
-        // Используем readline вместо getline(cin) (БАГ 3)
         char *rl_ans = readline(C_YELLOW "[Ответ был прерван. Сохранить частичный ответ в историю? (y/n)]: " C_RESET);
         std::string ans;
         if (rl_ans) { ans = std::string(rl_ans); free(rl_ans); }
         if (ans != "y" && ans != "Y" && ans != "д" && ans != "Д") {
-            // Убираем последнее сообщение пользователя из истории
-            if (!G.messages.empty() && G.messages.back()["role"] == "user") {
+            if (msgs_before > 0 && msgs_before <= G.messages.size()) {
+                G.messages.resize(msgs_before);
+                std::cout << C_GRAY << "[История откачена к состоянию до запроса]"
+                          << C_RESET << std::endl;
+            } else if (!G.messages.empty() && G.messages.back()["role"] == "user") {
                 G.messages.pop_back();
                 std::cout << C_GRAY << "[Вопрос и частичный ответ удалены из истории]"
                           << C_RESET << std::endl;
@@ -660,53 +665,38 @@ void process_response(const std::string &content, bool aborted) {
     // Сохраняем ответ ассистента в историю
     G.messages.push_back({{"role", "assistant"}, {"content", content}});
 
-    if (aborted) return; // не выполняем bash при прерванном ответе
+    if (aborted) return;
 
-    // Парсим и выполняем bash-команду если есть
-    std::string cmd_result = for_com_parse(content);
-    if (!cmd_result.empty()) {
+    // Цикл выполнения bash-команд из ответов (до MAX_BASH_CHAIN итераций)
+    const int MAX_BASH_CHAIN = 7;
+    std::string current_content = content;
+    for (int chain = 0; chain < MAX_BASH_CHAIN; ++chain) {
+        std::string cmd_result = for_com_parse(current_content);
+        if (cmd_result.empty()) break;
+
         G.messages.push_back({{"role", "user"},
             {"content", "[Результат выполнения команды]:\n" + cmd_result}});
 
-        // Второй запрос после выполнения команды
-        bool aborted2 = false;
-        std::string content2 = do_api_request(aborted2);
-        if (!content2.empty()) {
-            std::cout << "\n" << C_BOLD << C_CYAN << "[Ассистент]:" << C_RESET << "\n";
-            render_markdown(content2);
-            std::cout << std::endl;
+        bool chain_aborted = false;
+        std::string next_content = do_api_request(chain_aborted);
+        if (next_content.empty()) break;
 
-            if (!aborted2) {
-                G.messages.push_back({{"role", "assistant"}, {"content", content2}});
-                // БАГ 2: после 2го ответа тоже выполняем bash и делаем 3й запрос
-                std::string cmd_result2 = for_com_parse(content2);
-                if (!cmd_result2.empty()) {
-                    G.messages.push_back({{"role", "user"},
-                        {"content", "[Результат выполнения команды]:\n" + cmd_result2}});
-                    // 3й запрос к API
-                    bool aborted3 = false;
-                    std::string content3 = do_api_request(aborted3);
-                    if (!content3.empty()) {
-                        std::cout << "\n" << C_BOLD << C_CYAN << "[Ассистент]:" << C_RESET << "\n";
-                        render_markdown(content3);
-                        std::cout << std::endl;
-                        if (!aborted3) {
-                            G.messages.push_back({{"role", "assistant"}, {"content", content3}});
-                        } else {
-                            std::cout << C_YELLOW << "[Третий ответ прерван, не сохранён]"
-                                      << C_RESET << std::endl;
-                        }
-                    }
-                }
-            } else {
-                std::cout << C_YELLOW << "[Второй ответ прерван, не сохранён]"
-                          << C_RESET << std::endl;
-            }
+        std::cout << "\n" << C_BOLD << C_CYAN << "[Ассистент]:" << C_RESET << "\n";
+        render_markdown(next_content);
+        std::cout << std::endl;
+
+        if (chain_aborted) {
+            std::cout << C_YELLOW << "[Ответ прерван, не сохранён]"
+                      << C_RESET << std::endl;
+            break;
         }
+
+        G.messages.push_back({{"role", "assistant"}, {"content", next_content}});
+        current_content = next_content;
     }
 
     // Автосохранение каждые 10 сообщений
-    if (G.messages.size() >= 10 && G.messages.size() % 10 == 0) { // БАГ 4: было % 10 < 3
+    if (G.messages.size() >= 10 && G.messages.size() % 10 == 0) {
         save_history();
     }
 }
@@ -731,6 +721,56 @@ void do_exit() {
 }
 
 // ─────────────────────────── Справка ─────────────────────────
+// ─────────────────────── Список моделей ──────────────────────
+static const std::vector<std::string> AVAILABLE_MODELS = {
+    "anthropic/claude-opus-4.6",
+    "nvidia/nemotron-3-super-120b-a12b:free",
+    "minimax/minimax-m2.5",
+    "anthropic/claude-sonnet-4",
+    "openai/gpt-5.2",
+    "google/gemini-3.1-pro-preview",
+    "x-ai/grok-4",
+    "qwen/qwen3-max-thinking",
+    "xiaomi/mimo-v2-flash",
+    "nex-agi/deepseek-v3.1-nex-n1",
+    "anthropic/claude-sonnet-4.6",
+};
+
+void cmd_model_select() {
+    std::cout << C_YELLOW << "\n╔══════════════════════════════════════════════════╗\n";
+    std::cout << "║             Доступные модели                     ║\n";
+    std::cout << "╠══════════════════════════════════════════════════╣" << C_RESET << "\n";
+    for (size_t i = 0; i < AVAILABLE_MODELS.size(); ++i) {
+        bool is_current = (AVAILABLE_MODELS[i] == G.model);
+        if (is_current)
+            std::cout << C_GREEN << C_BOLD;
+        else
+            std::cout << C_CYAN;
+        printf("  %2zu) %s", i + 1, AVAILABLE_MODELS[i].c_str());
+        if (is_current) std::cout << "  ◄── текущая";
+        std::cout << C_RESET << "\n";
+    }
+    std::cout << C_YELLOW << "╚══════════════════════════════════════════════════╝" << C_RESET << "\n";
+    char *rl_choice = readline(C_YELLOW "[Номер модели или Enter для отмены]: " C_RESET);
+    if (!rl_choice) return;
+    std::string choice(rl_choice);
+    free(rl_choice);
+    if (choice.empty()) return;
+    try {
+        int idx = std::stoi(choice);
+        if (idx >= 1 && idx <= (int)AVAILABLE_MODELS.size()) {
+            G.model = AVAILABLE_MODELS[idx - 1];
+            std::cout << C_GREEN << "[Модель: " << G.model << "]" << C_RESET << std::endl;
+        } else {
+            std::cerr << C_RED << "[Неверный номер]" << C_RESET << std::endl;
+        }
+    } catch (...) {
+        // Может быть введено имя модели напрямую
+        G.model = choice;
+        std::cout << C_GREEN << "[Модель: " << G.model << "]" << C_RESET << std::endl;
+    }
+}
+
 void print_help() {
     std::cout << C_YELLOW
         << "Специальные команды:\n"
@@ -741,10 +781,13 @@ void print_help() {
         << "  /delete N          — удалить сообщение N из истории\n"
         << "  /retry             — повторить последний запрос\n"
         << "  /tokens            — показать использование токенов\n"
-        << "  /model [name]      — показать/сменить модель\n"
+        << "  /model [name|N]    — выбор модели из списка / по имени / по номеру\n"
         << "  /temp [0.0-2.0]    — показать/сменить температуру\n"
         << "  /maxtokens [N]     — показать/сменить max_tokens\n"
         << "  /system            — показать системный промпт\n"
+        << "  /file <path> [msg] — загрузить файл и задать вопрос\n"
+        << "  /autorun           — вкл/выкл авто-выполнение bash\n"
+        << "  /cost              — стоимость токенов в $\n"
         << "  /help              — эта справка\n"
         << "  /exit              — выход\n"
         << "\nМногострочный ввод:\n"
@@ -802,6 +845,156 @@ void cmd_delete(const std::string &arg) {
     } catch (...) {
         std::cerr << C_RED << "[Использование: /delete N]" << C_RESET << std::endl;
     }
+}
+
+// ─────────────────────────── /file ───────────────────────────
+void cmd_file(const std::string &arg) {
+    if (arg.empty()) {
+        std::cerr << C_RED << "[Использование: /file <путь> [вопрос]]" << C_RESET << std::endl;
+        return;
+    }
+    // Разделяем путь и опциональный вопрос
+    std::string path, question;
+    // Если путь в кавычках
+    if (arg[0] == '"' || arg[0] == '\'') {
+        char quote = arg[0];
+        size_t end = arg.find(quote, 1);
+        if (end != std::string::npos) {
+            path = arg.substr(1, end - 1);
+            if (end + 2 < arg.size()) question = arg.substr(end + 2);
+        } else {
+            path = arg.substr(1);
+        }
+    } else {
+        size_t sp = arg.find(' ');
+        if (sp != std::string::npos) {
+            path = arg.substr(0, sp);
+            question = arg.substr(sp + 1);
+        } else {
+            path = arg;
+        }
+    }
+    // Раскрываем ~ в начале пути
+    if (!path.empty() && path[0] == '~') {
+        path = get_home_dir() + path.substr(1);
+    }
+    std::ifstream f(path);
+    if (!f.is_open()) {
+        std::cerr << C_RED << "[Не удалось открыть файл: " << path << "]" << C_RESET << std::endl;
+        return;
+    }
+    std::string content((std::istreambuf_iterator<char>(f)),
+                         std::istreambuf_iterator<char>());
+    if (content.empty()) {
+        std::cerr << C_RED << "[Файл пуст: " << path << "]" << C_RESET << std::endl;
+        return;
+    }
+    // Определяем расширение для подсветки
+    std::string ext;
+    size_t dot = path.rfind('.');
+    if (dot != std::string::npos) ext = path.substr(dot + 1);
+    // Формируем сообщение
+    std::string msg = "Файл `" + path + "` (" + std::to_string(content.size()) + " байт):\n```" + ext + "\n" + content;
+    // Закрываем блок кода если нет завершающего newline
+    if (!msg.empty() && msg.back() != '\n') msg += "\n";
+    msg += "```";
+    if (!question.empty()) {
+        msg += "\n\n" + question;
+    }
+    std::cout << C_YELLOW << "[Файл загружен: " << path << " ("
+              << content.size() << " байт)]" << C_RESET << std::endl;
+    G.messages.push_back({{"role", "user"}, {"content", msg}});
+    // Делаем запрос к API
+    size_t msgs_before = G.messages.size() - 1;
+    bool aborted = false;
+    std::string response = do_api_request(aborted);
+    if (g_exit_requested) do_exit();
+    process_response(response, aborted, msgs_before);
+}
+
+// ─────────────────────────── /cost ───────────────────────────
+struct ModelPricing {
+    const char* model_prefix;
+    double prompt_per_mtok;     // $ per 1M prompt tokens
+    double completion_per_mtok; // $ per 1M completion tokens
+};
+
+static const ModelPricing KNOWN_PRICING[] = {
+    {"anthropic/claude-opus",     15.0,  75.0},
+    {"anthropic/claude-sonnet",    3.0,  15.0},
+    {"anthropic/claude-haiku",     0.25,  1.25},
+    {"openai/gpt-5",              10.0,  30.0},
+    {"openai/gpt-4.1",            2.0,   8.0},
+    {"openai/gpt-4.1-mini",       0.4,   1.6},
+    {"openai/gpt-4.1-nano",       0.1,   0.4},
+    {"openai/o3",                 10.0,  40.0},
+    {"openai/o4-mini",             1.1,   4.4},
+    {"google/gemini-2.5-pro",      1.25,  10.0},
+    {"google/gemini-2.5-flash",    0.15,   0.6},
+    {"google/gemini-3",            1.25,  10.0},
+    {"x-ai/grok-4",              10.0,  30.0},
+    {"x-ai/grok-3",               3.0,  15.0},
+    {"x-ai/grok-3-mini",          0.3,   0.5},
+    {"deepseek/deepseek-r1",       0.55,  2.19},
+    {"deepseek/deepseek-chat",     0.27,  1.10},
+    {"qwen/qwen3",                 0.16,  0.64},
+    {"meta-llama/llama-4",         0.2,   0.6},
+    {"minimax/minimax-m2.5",       0.5,   2.0},
+    {nullptr, 0, 0}
+};
+
+void print_cost() {
+    double p_price = 0, c_price = 0;
+    bool found = false;
+    for (int i = 0; KNOWN_PRICING[i].model_prefix != nullptr; ++i) {
+        if (G.model.find(KNOWN_PRICING[i].model_prefix) == 0) {
+            p_price = KNOWN_PRICING[i].prompt_per_mtok;
+            c_price = KNOWN_PRICING[i].completion_per_mtok;
+            found = true;
+            break;
+        }
+    }
+    double prompt_cost = (G.total_prompt_tokens / 1000000.0) * p_price;
+    double completion_cost = (G.total_completion_tokens / 1000000.0) * c_price;
+    double total_cost = prompt_cost + completion_cost;
+
+    std::cout << C_MAGENTA << "\n╔══════════════════════════════════════╗\n";
+    std::cout << "║       Использование токенов          ║\n";
+    std::cout << "╠══════════════════════════════════════╣\n";
+    std::cout << "║  Модель:     " << G.model;
+    // Паддинг
+    int pad = 24 - (int)G.model.size();
+    for (int i = 0; i < pad; ++i) std::cout << " ";
+    if (pad < 0) std::cout << "\n║              ";
+    std::cout << "║\n";
+    std::cout << "║  Промпт:     ";
+    printf("%8d токенов", G.total_prompt_tokens);
+    std::cout << "       ║\n";
+    std::cout << "║  Ответы:     ";
+    printf("%8d токенов", G.total_completion_tokens);
+    std::cout << "       ║\n";
+    std::cout << "║  Всего:      ";
+    printf("%8d токенов", G.total_prompt_tokens + G.total_completion_tokens);
+    std::cout << "       ║\n";
+    if (found) {
+        std::cout << "╠══════════════════════════════════════╣\n";
+        std::cout << "║  Промпт:     ";
+        printf("$%-8.4f", prompt_cost);
+        std::cout << "              ║\n";
+        std::cout << "║  Ответы:     ";
+        printf("$%-8.4f", completion_cost);
+        std::cout << "              ║\n";
+        std::cout << "║  Итого:      ";
+        printf("$%-8.4f", total_cost);
+        std::cout << "              ║\n";
+        std::cout << "║  (";
+        printf("$%.2f/$%.2f", p_price, c_price);
+        std::cout << " за 1M токенов)     ║\n";
+    } else {
+        std::cout << "╠══════════════════════════════════════╣\n";
+        std::cout << "║  Цены для модели не найдены          ║\n";
+    }
+    std::cout << "╚══════════════════════════════════════╝" << C_RESET << std::endl;
 }
 
 // ─────────────────────────── Ввод пользователя ───────────────
@@ -967,6 +1160,8 @@ int main(int argc, char *argv[]) {
     std::cout << C_BOLD << C_CYAN << "=== Chat CLI ===" << C_RESET << std::endl;
     std::cout << C_YELLOW << "Модель: " << G.model << C_RESET << std::endl;
     std::cout << C_YELLOW << "Введите /help для справки" << C_RESET << std::endl;
+    std::cout << C_GRAY   << "Autorun: " << (G.autorun ? "вкл" : "выкл")
+              << " (переключить: /autorun)" << C_RESET << std::endl;
     std::cout << C_GRAY   << "Подсказка: Enter — новая строка, '//' — отправить, "
                              "Ctrl+C во время ответа — прервать"
               << C_RESET << std::endl;
@@ -990,6 +1185,14 @@ int main(int argc, char *argv[]) {
         if (userAnswer == "/load")    { load_history();  continue; }
         if (userAnswer == "/history") { print_history(); continue; }
         if (userAnswer == "/tokens")  { print_tokens();  continue; }
+        if (userAnswer == "/cost")    { print_cost();    continue; }
+        if (userAnswer == "/autorun") {
+            G.autorun = !G.autorun;
+            std::cout << C_YELLOW << "[Autorun: "
+                      << (G.autorun ? "ВКЛЮЧЁН ⚡" : "выключен")
+                      << "]" << C_RESET << std::endl;
+            continue;
+        }
         if (userAnswer == "/exit")    { do_exit(); }
         if (userAnswer == "/system")  {
             std::cout << C_MAGENTA << "[Системный промпт]:\n"
@@ -1033,18 +1236,35 @@ int main(int argc, char *argv[]) {
             G.messages.push_back({{"role", "system"}, {"content", G.sys_prompt}});
             G.total_prompt_tokens     = 0;
             G.total_completion_tokens = 0;
-            std::cout << C_YELLOW << "[История очищена]" << C_RESET << std::endl;
+            // Очищаем экран терминала
+            std::cout << "\033[2J\033[H" << std::flush;
+            std::cout << C_BOLD << C_CYAN << "=== Chat CLI ===" << C_RESET << std::endl;
+            std::cout << C_YELLOW << "Модель: " << G.model << C_RESET << std::endl;
+            std::cout << C_YELLOW << "[История очищена, экран очищен]" << C_RESET << std::endl;
             continue;
         } else if (match_command(userAnswer, "/delete")) {
             cmd_delete(command_arg(userAnswer, "/delete"));
             continue;
+        } else if (match_command(userAnswer, "/file")) {
+            cmd_file(command_arg(userAnswer, "/file"));
+            continue;
         } else if (match_command(userAnswer, "/model")) {
             std::string arg = command_arg(userAnswer, "/model");
             if (!arg.empty()) {
-                G.model = arg;
-                std::cout << C_YELLOW << "[Модель: " << G.model << "]" << C_RESET << std::endl;
+                // Проверяем — может это номер из списка
+                try {
+                    int idx = std::stoi(arg);
+                    if (idx >= 1 && idx <= (int)AVAILABLE_MODELS.size()) {
+                        G.model = AVAILABLE_MODELS[idx - 1];
+                    } else {
+                        G.model = arg;
+                    }
+                } catch (...) {
+                    G.model = arg;
+                }
+                std::cout << C_GREEN << "[Модель: " << G.model << "]" << C_RESET << std::endl;
             } else {
-                std::cout << C_YELLOW << "[Текущая модель: " << G.model << "]" << C_RESET << std::endl;
+                cmd_model_select();
             }
             continue;
         } else if (match_command(userAnswer, "/temp")) {
@@ -1098,12 +1318,13 @@ int main(int argc, char *argv[]) {
         }
 
         // ── API запрос ──
+        size_t msgs_before = G.messages.size() - 1;
         bool aborted = false;
         std::string content = do_api_request(aborted);
 
         if (g_exit_requested) do_exit();
 
-        process_response(content, aborted);
+        process_response(content, aborted, msgs_before);
     }
 
     curl_global_cleanup();
