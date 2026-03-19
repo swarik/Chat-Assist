@@ -91,9 +91,8 @@ static volatile sig_atomic_t g_in_streaming   = 0; // 1 пока идёт стр
 static std::mutex g_stream_mutex;  // Мьютекс для защиты потоков
 
 static void signal_handler(int /*sig*/) {
-    std::lock_guard<std::mutex> lock(g_stream_mutex);
+    // Только sig_atomic_t операции — mutex нельзя использовать в обработчике сигнала (не async-signal-safe)
     if (g_in_streaming) {
-        // Прерываем только стриминг, не выходим
         g_stream_abort = 1;
     } else {
         g_exit_requested = 1;
@@ -438,12 +437,23 @@ std::string for_com_parse(const std::string &content) {
     std::string com_cont = content.substr(cnt_start + open_tag.size(),
                                           cnt_end - (cnt_start + open_tag.size()));
 
-    std::cout << C_YELLOW << "[Выполнить команду? (y/n|д/н)]: " << C_RESET << std::flush;
-    std::string confirm;
-    if (!std::getline(std::cin, confirm)) return "";
+    // Используем readline вместо getline(cin) — они не должны смешиваться (БАГ 3)
+    char *rl_confirm = readline(C_YELLOW "[Выполнить команду? (y/n|д/н)]: " C_RESET);
+    if (!rl_confirm) return "";
+    std::string confirm(rl_confirm);
+    free(rl_confirm);
     if (confirm != "y" && confirm != "Y" && confirm != "д" && confirm != "Д") {
         std::cout << C_RED << "[Выполнение отменено пользователем]" << C_RESET << std::endl;
         return "";
+    }
+    // БАГ 8: предупреждаем если в ответе несколько bash-блоков (выполняется только первый)
+    {
+        size_t second = content.find("```bash", cnt_start + open_tag.size());
+        if (second != std::string::npos) {
+            std::cout << C_YELLOW
+                      << "[Внимание: в ответе несколько bash-блоков, выполняется только первый]"
+                      << C_RESET << std::endl;
+        }
     }
     std::cout << C_YELLOW << "[Выполняю...]" << C_RESET << std::endl;
     std::string result = exec_with_timeout(com_cont, CMD_TIMEOUT);
@@ -453,11 +463,12 @@ std::string for_com_parse(const std::string &content) {
 
 // ─────────────────────────── Спиннер ─────────────────────────
 static std::atomic<bool> g_spinner_active{false};
+static std::atomic<bool> g_spinner_stop{false}; // атомарный флаг остановки спиннера (БАГ 9)
 
 static void spinner_thread_func(const std::string &model) {
     const char* frames[] = {"⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"};
     int idx = 0;
-    while (g_spinner_active.load() && !g_exit_requested) {
+    while (g_spinner_active.load() && !g_spinner_stop.load()) {
         std::cout << "\r" << C_YELLOW << frames[idx % 10]
                   << " Думаю... [" << model << "]  "
                   << C_RESET << std::flush;
@@ -553,6 +564,7 @@ std::string do_api_request(bool &aborted) {
     }
 
     // Запускаем спиннер
+    g_spinner_stop.store(false);
     g_spinner_active.store(true);
     std::thread spinner_t(spinner_thread_func, G.model);
 
@@ -630,11 +642,11 @@ void process_response(const std::string &content, bool aborted) {
 
     if (aborted) {
         // Частичный ответ — спрашиваем что делать
-        std::cout << C_YELLOW
-                  << "[Ответ был прерван. Сохранить частичный ответ в историю? (y/n)]: "
-                  << C_RESET << std::flush;
+        // Используем readline вместо getline(cin) (БАГ 3)
+        char *rl_ans = readline(C_YELLOW "[Ответ был прерван. Сохранить частичный ответ в историю? (y/n)]: " C_RESET);
         std::string ans;
-        if (!std::getline(std::cin, ans) || (ans != "y" && ans != "Y" && ans != "д" && ans != "Д")) {
+        if (rl_ans) { ans = std::string(rl_ans); free(rl_ans); }
+        if (ans != "y" && ans != "Y" && ans != "д" && ans != "Д") {
             // Убираем последнее сообщение пользователя из истории
             if (!G.messages.empty() && G.messages.back()["role"] == "user") {
                 G.messages.pop_back();
@@ -666,10 +678,25 @@ void process_response(const std::string &content, bool aborted) {
 
             if (!aborted2) {
                 G.messages.push_back({{"role", "assistant"}, {"content", content2}});
+                // БАГ 2: после 2го ответа тоже выполняем bash и делаем 3й запрос
                 std::string cmd_result2 = for_com_parse(content2);
                 if (!cmd_result2.empty()) {
                     G.messages.push_back({{"role", "user"},
                         {"content", "[Результат выполнения команды]:\n" + cmd_result2}});
+                    // 3й запрос к API
+                    bool aborted3 = false;
+                    std::string content3 = do_api_request(aborted3);
+                    if (!content3.empty()) {
+                        std::cout << "\n" << C_BOLD << C_CYAN << "[Ассистент]:" << C_RESET << "\n";
+                        render_markdown(content3);
+                        std::cout << std::endl;
+                        if (!aborted3) {
+                            G.messages.push_back({{"role", "assistant"}, {"content", content3}});
+                        } else {
+                            std::cout << C_YELLOW << "[Третий ответ прерван, не сохранён]"
+                                      << C_RESET << std::endl;
+                        }
+                    }
                 }
             } else {
                 std::cout << C_YELLOW << "[Второй ответ прерван, не сохранён]"
@@ -679,7 +706,7 @@ void process_response(const std::string &content, bool aborted) {
     }
 
     // Автосохранение каждые 10 сообщений
-    if (G.messages.size() >= 10 && G.messages.size() % 10 < 3) {
+    if (G.messages.size() >= 10 && G.messages.size() % 10 == 0) { // БАГ 4: было % 10 < 3
         save_history();
     }
 }
@@ -690,6 +717,7 @@ void do_exit() {
     
     // Останавливаем спиннер если он активен
     if (g_spinner_active.load()) {
+        g_spinner_stop.store(true);
         g_spinner_active.store(false);
         std::this_thread::sleep_for(std::chrono::milliseconds(150));
     }
@@ -780,7 +808,7 @@ void cmd_delete(const std::string &arg) {
 static bool get_user_input(std::string &out) {
     std::string result;
     bool first_line = true;
-    bool multiline  = false;
+    // bool multiline = false; // БАГ 7: переменная объявлялась но нигде не читалась
     int  line_num   = 1;
 
     while (true) {
@@ -814,7 +842,6 @@ static bool get_user_input(std::string &out) {
                           << "[Нет текста для отправки]"
                           << C_RESET << std::endl;
                 first_line = true;
-                multiline  = false;
                 line_num   = 1;
                 result.clear();
                 continue;
@@ -831,7 +858,6 @@ static bool get_user_input(std::string &out) {
             // Первая непустая строка — добавляем и переходим в многострочный режим
             result = sline;
             first_line = false;
-            multiline  = true;
             line_num   = 2;
             std::cout << C_GRAY
                       << "[Многострочный режим: Enter — новая строка, '//' — отправить]"
@@ -971,7 +997,8 @@ int main(int argc, char *argv[]) {
             continue;
         }
         if (userAnswer == "/retry") {
-            // Ищем последнее сообщение assistant
+            // БАГ 5: ищем последний assistant, затем откатываемся до user перед ним
+            // чтобы удалить и assistant, и возможные bash-результаты после него
             int last_assistant = -1;
             for (int i = (int)G.messages.size() - 1; i >= 0; --i) {
                 if (G.messages[i]["role"] == "assistant") {
@@ -980,8 +1007,21 @@ int main(int argc, char *argv[]) {
                 }
             }
             if (last_assistant > 0) {
-                // Удаляем assistant и всё что после него (включая возможные результаты bash)
-                G.messages.resize(last_assistant);
+                // Ищем user-сообщение перед этим assistant (это и есть наш вопрос)
+                int user_before = -1;
+                for (int i = last_assistant - 1; i >= 0; --i) {
+                    if (G.messages[i]["role"] == "user") {
+                        user_before = i;
+                        break;
+                    }
+                }
+                // Обрезаем до user_before (не включая его) — то есть до нашего вопроса
+                // Сам вопрос остаётся, assistant и bash-результаты удаляются
+                if (user_before >= 0) {
+                    G.messages.resize(user_before + 1);
+                } else {
+                    G.messages.resize(last_assistant);
+                }
                 std::cout << C_YELLOW << "[Повтор запроса...]" << C_RESET << std::endl;
             } else {
                 std::cout << C_GRAY << "[Нет ответа ассистента для повтора]"
