@@ -61,7 +61,7 @@ struct ChatSession {
     std::string       history_file;
 
     //std::string       model          = "nvidia/nemotron-3-super-120b-a12b:free";
-    std::string       model          = "minimax/minimax-m2.5";
+    //std::string       model          = "minimax/minimax-m2.5";
     //std::string       model          = "anthropic/claude-sonnet-4";
     //std::string       model          = "openai/gpt-5.2";
     //std::string       model          = "google/gemini-3.1-pro-preview";
@@ -70,7 +70,7 @@ struct ChatSession {
     //std::string       model          = "xiaomi/mimo-v2-flash";
     //std::string       model          = "nex-agi/deepseek-v3.1-nex-n1";
     //std::string       model          = "anthropic/claude-opus-4.6";
-    //std::string       model          = "anthropic/claude-sonnet-4.6";
+    std::string       model          = "anthropic/claude-sonnet-4.6";
 
 
     std::string       sys_prompt;
