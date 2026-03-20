@@ -45,7 +45,7 @@ static std::string get_home_dir() {
 }
 
 // ─────────────────────────── Константы ───────────────────────
-#define CMD_TIMEOUT         150
+#define CMD_TIMEOUT         250
 #define MAX_CMD_OUTPUT      196000
 #define MAX_MESSAGES        500
 #define DEFAULT_TEMPERATURE 0.7
@@ -195,31 +195,31 @@ static std::string render_inline_md(const std::string &line) {
 }
 
 // ─────────────────────────── Markdown таблицы ─────────────────
-static std::vector<size_t> find_table_cols(const std::string &line) {
-    std::vector<size_t> cols;
-    for (size_t i = 0; i < line.size(); ++i)
-        if (line[i] == '|') cols.push_back(i);
-    return cols;
+static std::vector<std::string> split_table_cells(const std::string &line) {
+    std::vector<std::string> cells;
+    std::string trimmed = line;
+    while (!trimmed.empty() && trimmed.front() == '|') trimmed.erase(0, 1);
+    while (!trimmed.empty() && trimmed.back() == '|') trimmed.pop_back();
+    std::istringstream ss(trimmed);
+    std::string cell;
+    while (std::getline(ss, cell, '|')) {
+        size_t start = cell.find_first_not_of(' ');
+        size_t end = cell.find_last_not_of(' ');
+        if (start != std::string::npos)
+            cells.push_back(cell.substr(start, end - start + 1));
+        else
+            cells.push_back("");
+    }
+    return cells;
 }
 
-static void render_table_row(const std::string &line, const std::vector<size_t> &cols) {
-    std::cout << "│";
-    size_t pos = 0;
-    for (size_t i = 0; i < cols.size(); ++i) {
-        size_t end = (i + 1 < cols.size()) ? cols[i] : line.size();
-        std::string cell = line.substr(pos, end - pos);
-        // Убираем | и пробелы
-        while (!cell.empty() && (cell[0]=='|' || cell[0]==' ')) cell.erase(cell.begin(), cell.begin()+1);
-        while (!cell.empty() && (cell.back()=='|' || cell.back()==' ')) cell.pop_back();
-        
-        // Выравнивание
-        std::cout << " " << render_inline_md(cell);
-        size_t pad = (i + 1 < cols.size()) ? (cols[i+1] - cols[i] - 1) : 10;
-        if (pad > cell.size() + 1) {
-            for (size_t p = 0; p < pad - cell.size() - 1; ++p) std::cout << " ";
-        }
+static void render_table_row(const std::vector<std::string> &cells) {
+    std::cout << C_GRAY << "\xe2\x94\x82" << C_RESET;
+    for (size_t i = 0; i < cells.size(); ++i) {
+        std::cout << " " << render_inline_md(cells[i]) << "\t";
+        std::cout << C_GRAY << "\xe2\x94\x82" << C_RESET;
     }
-    std::cout << "│\n";
+    std::cout << "\n";
 }
 
 static void render_markdown(const std::string &text) {
@@ -327,21 +327,20 @@ static void render_markdown(const std::string &text) {
             for (char c : line) if (c!='|' && c!='-' && c!=' ' && c!=':') { is_separator = false; break; }
             
             if (is_separator) {
-                // Разделитель ────
-                std::cout << C_GRAY;
-                for (char c : line) {
-                    if (c == '-') std::cout << "─";
-                    else if (c == ':') std::cout << ":";
-                    else std::cout << " ";
+                auto sep_cells = split_table_cells(line);
+                std::cout << C_GRAY << "\xe2\x94\x9c";
+                for (size_t i = 0; i < sep_cells.size(); ++i) {
+                    std::cout << "\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80";
+                    std::cout << ((i + 1 < sep_cells.size()) ? "\xe2\x94\xbc" : "\xe2\x94\xa4");
                 }
                 std::cout << C_RESET << "\n";
                 continue;
             }
             
             // Строка таблицы
-            auto cols = find_table_cols(line);
-            if (cols.size() >= 2) {
-                render_table_row(line, cols);
+            auto cells = split_table_cells(line);
+            if (cells.size() >= 2) {
+                render_table_row(cells);
                 continue;
             }
         }
@@ -538,52 +537,17 @@ static void spinner_thread_func(const std::string &model) {
     std::cout << "\r\033[2K" << std::flush;
 }
 
-// ─────────────────────────── Streaming SSE ───────────────────
-struct StreamContext {
-    std::string buffer;
-    std::string full_content;
-    int         prompt_tokens     = 0;
-    int         completion_tokens = 0;
-    bool        done              = false;
-};
-
-static size_t StreamCallback(void *contents, size_t size, size_t nmemb, void *userp) {
-    if (g_stream_abort) return 0;
-
-    StreamContext *ctx = static_cast<StreamContext*>(userp);
-    std::string chunk((char*)contents, size * nmemb);
-    ctx->buffer += chunk;
-
-    std::string::size_type pos;
-    while ((pos = ctx->buffer.find("\n")) != std::string::npos) {
-        std::string line = ctx->buffer.substr(0, pos);
-        ctx->buffer.erase(0, pos + 1);
-        if (!line.empty() && line.back() == '\r') line.pop_back();
-        if (line.empty()) continue;
-        if (line == "data: [DONE]") { ctx->done = true; continue; }
-        if (line.rfind("data: ", 0) != 0) continue;
-        std::string json_str = line.substr(6);
-        try {
-            json j = json::parse(json_str);
-            if (j.contains("choices") && !j["choices"].empty()) {
-                auto &choice = j["choices"][0];
-                if (choice.contains("delta") && choice["delta"].contains("content")) {
-                    std::string token = choice["delta"]["content"];
-                    if (!token.empty()) ctx->full_content += token;
-                }
-            }
-            if (j.contains("usage")) {
-                ctx->prompt_tokens     = j["usage"].value("prompt_tokens", 0);
-                ctx->completion_tokens = j["usage"].value("completion_tokens", 0);
-            }
-        } catch (...) {}
-    }
-    return size * nmemb;
-}
-
 // ─────────────────────────── API запрос ──────────────────────
 // Возвращает full_content или "" при ошибке/прерывании
 // aborted — true если пользователь прервал Ctrl+C
+// Простой callback для накопления ответа
+static size_t WriteCallback(void *contents, size_t size, size_t nmemb, void *userp) {
+    if (g_stream_abort) return 0;
+    std::string *buf = static_cast<std::string*>(userp);
+    buf->append((char*)contents, size * nmemb);
+    return size * nmemb;
+}
+
 std::string do_api_request(bool &aborted) {
     aborted = false;
     std::string api_key = get_api_key();
@@ -599,19 +563,18 @@ std::string do_api_request(bool &aborted) {
         {"messages",    G.messages},
         {"temperature", G.temperature},
         {"max_tokens",  G.max_tokens},
-        {"stream",      true}
+        {"stream",      false}
     };
     std::string jsonData = jData.dump(-1, ' ', false, json::error_handler_t::replace);
 
     struct curl_slist *headers = nullptr;
     headers = curl_slist_append(headers, "Content-Type: application/json");
-    headers = curl_slist_append(headers, "Accept: text/event-stream");
     std::string auth = "Authorization: Bearer " + api_key;
     headers = curl_slist_append(headers, auth.c_str());
 
-    StreamContext sctx;
+    std::string response_body;
 
-    // Устанавливаем флаги под мьютексом
+    // Устанавливаем флаги
     {
         std::lock_guard<std::mutex> lock(g_stream_mutex);
         g_stream_abort = 0;
@@ -627,19 +590,18 @@ std::string do_api_request(bool &aborted) {
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS,    jsonData.c_str());
     curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)jsonData.size());
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER,    headers);
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, StreamCallback);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA,     &sctx);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT,       220L);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA,     &response_body);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT,       420L);
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 15L);
 
     CURLcode res = curl_easy_perform(curl);
 
-    // Останавливаем спиннер (немедленно)
+    // Останавливаем спиннер
     g_spinner_stop.store(true);
     g_spinner_active.store(false);
     if (spinner_t.joinable()) spinner_t.join();
 
-    // Сбрасываем флаги под мьютексом
     {
         std::lock_guard<std::mutex> lock(g_stream_mutex);
         g_in_streaming = 0;
@@ -650,7 +612,7 @@ std::string do_api_request(bool &aborted) {
     curl_slist_free_all(headers);
     curl_easy_cleanup(curl);
 
-    // Проверяем прерывание пользователем под мьютексом
+    // Проверяем прерывание
     bool was_aborted = false;
     {
         std::lock_guard<std::mutex> lock(g_stream_mutex);
@@ -659,12 +621,11 @@ std::string do_api_request(bool &aborted) {
             g_stream_abort = 0;
         }
     }
-    
+
     if (was_aborted) {
         aborted = true;
-        std::cout << "\n" << C_YELLOW << "[Вывод прерван пользователем]" << C_RESET << std::endl;
-        // Возвращаем то что успело накопиться (может быть частичный ответ)
-        return sctx.full_content;
+        std::cout << "\n" << C_YELLOW << "[Запрос прерван пользователем]" << C_RESET << std::endl;
+        return "";
     }
 
     if (res != CURLE_OK) {
@@ -673,18 +634,34 @@ std::string do_api_request(bool &aborted) {
     }
 
     if (http_code != 200) {
-        std::string err_text = sctx.full_content + sctx.buffer;
-        if (err_text.empty()) err_text = "(empty response)";
         std::cerr << C_RED << "[HTTP " << http_code << "] "
-                  << err_text.substr(0, std::min((size_t)500, err_text.size()))
+                  << response_body.substr(0, std::min((size_t)500, response_body.size()))
                   << C_RESET << std::endl;
         return "";
     }
 
-    G.total_prompt_tokens     += sctx.prompt_tokens;
-    G.total_completion_tokens += sctx.completion_tokens;
-
-    return sanitize_utf8(sctx.full_content);
+    // Парсим JSON-ответ
+    try {
+        json j = json::parse(response_body);
+        std::string content;
+        if (j.contains("choices") && !j["choices"].empty()) {
+            auto &choice = j["choices"][0];
+            if (choice.contains("message") && choice["message"].contains("content")) {
+                content = choice["message"]["content"];
+            }
+        }
+        if (j.contains("usage")) {
+            int pt = j["usage"].value("prompt_tokens", 0);
+            int ct = j["usage"].value("completion_tokens", 0);
+            G.total_prompt_tokens     += pt;
+            G.total_completion_tokens += ct;
+        }
+        return sanitize_utf8(content);
+    } catch (const std::exception &e) {
+        std::cerr << C_RED << "[Ошибка парсинга ответа: " << e.what() << "]" << C_RESET << std::endl;
+        std::cerr << C_GRAY << response_body.substr(0, 300) << C_RESET << std::endl;
+        return "";
+    }
 }
 
 // ─────────────────────────── Обработка ответа ────────────────
@@ -1109,15 +1086,20 @@ static bool get_user_input(std::string &out) {
             first_line = false;
             line_num   = 2;
             std::cout << C_GRAY
-                      << "[Многострочный режим: Enter — новая строка, '//' — отправить]"
+                      << "[Многострочный режим: Enter — новая строка, '.' — пустая строка, '//' — отправить]"
                       << C_RESET << std::endl;
         } else {
             // Пустая строка в многострочном режиме — отправляем
             if (sline.empty()) {
                 break;
             }
-            result += "\n";
-            result += sline;
+            // Одиночная точка — вставить пустую строку
+            if (sline == ".") {
+                result += "\n";
+            } else {
+                result += "\n";
+                result += sline;
+            }
             line_num++;
         }
     }
@@ -1256,8 +1238,6 @@ int main(int argc, char *argv[]) {
             continue;
         }
         if (userAnswer == "/retry") {
-            // БАГ 5: ищем последний assistant, затем откатываемся до user перед ним
-            // чтобы удалить и assistant, и возможные bash-результаты после него
             int last_assistant = -1;
             for (int i = (int)G.messages.size() - 1; i >= 0; --i) {
                 if (G.messages[i]["role"] == "assistant") {
@@ -1266,7 +1246,6 @@ int main(int argc, char *argv[]) {
                 }
             }
             if (last_assistant > 0) {
-                // Ищем user-сообщение перед этим assistant (это и есть наш вопрос)
                 int user_before = -1;
                 for (int i = last_assistant - 1; i >= 0; --i) {
                     if (G.messages[i]["role"] == "user") {
@@ -1274,14 +1253,13 @@ int main(int argc, char *argv[]) {
                         break;
                     }
                 }
-                // Обрезаем до user_before (не включая его) — то есть до нашего вопроса
-                // Сам вопрос остаётся, assistant и bash-результаты удаляются
                 if (user_before >= 0) {
                     G.messages.resize(user_before + 1);
                 } else {
                     G.messages.resize(last_assistant);
                 }
                 std::cout << C_YELLOW << "[Повтор запроса...]" << C_RESET << std::endl;
+                // Fall through к API запросу ниже
             } else {
                 std::cout << C_GRAY << "[Нет ответа ассистента для повтора]"
                           << C_RESET << std::endl;
