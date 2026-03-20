@@ -61,16 +61,17 @@ struct ChatSession {
     std::string       history_file;
 
     //std::string       model          = "nvidia/nemotron-3-super-120b-a12b:free";
-    std::string       model          = "minimax/minimax-m2.7";
+    //std::string       model          = "minimax/minimax-m2.7";
     //std::string       model          = "anthropic/claude-sonnet-4";
     //std::string       model          = "openai/gpt-5.2";
     //std::string       model          = "google/gemini-3.1-pro-preview";
     //std::string       model          = "x-ai/grok-4";
     //std::string       model          = "qwen/qwen3-max-thinking";
     //std::string       model          = "xiaomi/mimo-v2-flash";
+    //std::string       model          = "xiaomi/mimo-v2-pro"
     //std::string       model          = "nex-agi/deepseek-v3.1-nex-n1";
     //std::string       model          = "anthropic/claude-opus-4.6";
-    //std::string       model          = "anthropic/claude-sonnet-4.6";
+    std::string       model          = "anthropic/claude-sonnet-4.6";
 
 
     std::string       sys_prompt;
@@ -193,6 +194,34 @@ static std::string render_inline_md(const std::string &line) {
     return out;
 }
 
+// ─────────────────────────── Markdown таблицы ─────────────────
+static std::vector<size_t> find_table_cols(const std::string &line) {
+    std::vector<size_t> cols;
+    for (size_t i = 0; i < line.size(); ++i)
+        if (line[i] == '|') cols.push_back(i);
+    return cols;
+}
+
+static void render_table_row(const std::string &line, const std::vector<size_t> &cols) {
+    std::cout << "│";
+    size_t pos = 0;
+    for (size_t i = 0; i < cols.size(); ++i) {
+        size_t end = (i + 1 < cols.size()) ? cols[i] : line.size();
+        std::string cell = line.substr(pos, end - pos);
+        // Убираем | и пробелы
+        while (!cell.empty() && (cell[0]=='|' || cell[0]==' ')) cell.erase(cell.begin(), cell.begin()+1);
+        while (!cell.empty() && (cell.back()=='|' || cell.back()==' ')) cell.pop_back();
+        
+        // Выравнивание
+        std::cout << " " << render_inline_md(cell);
+        size_t pad = (i + 1 < cols.size()) ? (cols[i+1] - cols[i] - 1) : 10;
+        if (pad > cell.size() + 1) {
+            for (size_t p = 0; p < pad - cell.size() - 1; ++p) std::cout << " ";
+        }
+    }
+    std::cout << "│\n";
+}
+
 static void render_markdown(const std::string &text) {
     std::istringstream ss(text);
     std::string line;
@@ -292,6 +321,31 @@ static void render_markdown(const std::string &text) {
             }
         }
 
+        // ── Markdown таблицы ──
+        if (line.find('|') != std::string::npos) {
+            bool is_separator = true;
+            for (char c : line) if (c!='|' && c!='-' && c!=' ' && c!=':') { is_separator = false; break; }
+            
+            if (is_separator) {
+                // Разделитель ────
+                std::cout << C_GRAY;
+                for (char c : line) {
+                    if (c == '-') std::cout << "─";
+                    else if (c == ':') std::cout << ":";
+                    else std::cout << " ";
+                }
+                std::cout << C_RESET << "\n";
+                continue;
+            }
+            
+            // Строка таблицы
+            auto cols = find_table_cols(line);
+            if (cols.size() >= 2) {
+                render_table_row(line, cols);
+                continue;
+            }
+        }
+        
         std::cout << render_inline_md(line) << "\n";
     }
     if (in_code) {
@@ -734,6 +788,7 @@ static const std::vector<std::string> AVAILABLE_MODELS = {
     "xiaomi/mimo-v2-flash",
     "nex-agi/deepseek-v3.1-nex-n1",
     "anthropic/claude-sonnet-4.6",
+    "xiaomi/mimo-v2-pro",
 };
 
 void cmd_model_select() {
@@ -920,26 +975,27 @@ struct ModelPricing {
 };
 
 static const ModelPricing KNOWN_PRICING[] = {
-    {"anthropic/claude-opus",     15.0,  75.0},
-    {"anthropic/claude-sonnet",    3.0,  15.0},
+    {"anthropic/claude-opus",      5.0,   25.0},
+    {"anthropic/claude-sonnet",    3.0,   15.0},
     {"anthropic/claude-haiku",     0.25,  1.25},
-    {"openai/gpt-5",              10.0,  30.0},
-    {"openai/gpt-4.1",            2.0,   8.0},
-    {"openai/gpt-4.1-mini",       0.4,   1.6},
-    {"openai/gpt-4.1-nano",       0.1,   0.4},
-    {"openai/o3",                 10.0,  40.0},
+    {"openai/gpt-5",               10.0,  30.0},
+    {"openai/gpt-4.1",             2.0,   8.0},
+    {"openai/gpt-4.1-mini",        0.4,   1.6},
+    {"openai/gpt-4.1-nano",        0.1,   0.4},
+    {"openai/o3",                  10.0,  40.0},
     {"openai/o4-mini",             1.1,   4.4},
     {"google/gemini-2.5-pro",      1.25,  10.0},
     {"google/gemini-2.5-flash",    0.15,   0.6},
     {"google/gemini-3",            1.25,  10.0},
-    {"x-ai/grok-4",              10.0,  30.0},
-    {"x-ai/grok-3",               3.0,  15.0},
-    {"x-ai/grok-3-mini",          0.3,   0.5},
+    {"x-ai/grok-4",                10.0,  30.0},
+    {"x-ai/grok-3",                3.0,   15.0},
+    {"x-ai/grok-3-mini",           0.3,   0.5},
     {"deepseek/deepseek-r1",       0.55,  2.19},
     {"deepseek/deepseek-chat",     0.27,  1.10},
     {"qwen/qwen3",                 0.16,  0.64},
     {"meta-llama/llama-4",         0.2,   0.6},
-    {"minimax/minimax-m2.5",       0.5,   2.0},
+    {"minimax/minimax-m2.7",       0.3,   1.2},
+    {"xiaomi/mimo-v2-pro",         1.0,   3.0},
     {nullptr, 0, 0}
 };
 
