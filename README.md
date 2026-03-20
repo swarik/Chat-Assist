@@ -17,7 +17,7 @@
 
 ### Одна команда:
 
-    curl -fsSL https://raw.githubusercontent.com/USERNAME/REPO/main/install.sh | bash
+    curl -fsSL https://raw.githubusercontent.com/swarik/Chat-Assist/main/install.sh | bash
 
 ### Вручную (Ubuntu/Debian):
 
