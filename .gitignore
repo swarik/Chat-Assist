@@ -1,5 +1,6 @@
-# Игнорировать всё в этой папке
+# Игнорировать всё кроме нужных файлов
 *
-
-# Кроме файла sw_chat.cpp
+!.gitignore
 !sw_chat.cpp
+!install.sh
+!README.md

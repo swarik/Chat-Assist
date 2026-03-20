@@ -580,15 +580,16 @@ std::vector<std::string> parse_bash_blocks(const std::string &content) {
 }
 
 // Выполняет один bash-блок с подтверждением
-std::string execute_single_bash(const std::string &bash_code, int idx, int total) {
+// local_autorun — локальный флаг "запустить все блоки текущего пакета" (не трогает G.autorun)
+std::string execute_single_bash(const std::string &bash_code, int idx, int total, bool &local_autorun) {
     if (total > 1)
         std::cout << C_YELLOW << "[Bash блок " << (idx+1) << "/" << total << "]" << C_RESET << std::endl;
-    if (!G.autorun) {
+    if (!G.autorun && !local_autorun) {
         char *rl = readline(C_YELLOW "[Выполнить команду? (y/n/a-все|д/н/в)]: " C_RESET);
         if (!rl) return "[Пользователь отказался выполнять эту команду]";
         std::string ans(rl); free(rl);
         if (ans == "a" || ans == "A" || ans == "в" || ans == "В") {
-            G.autorun = true;
+            local_autorun = true;  // только для текущего пакета блоков
         } else if (ans != "y" && ans != "Y" && ans != "д" && ans != "Д") {
             std::cout << C_RED << "[Блок " << (idx+1) << " пропущен]" << C_RESET << std::endl;
             return "[Пользователь отказался выполнять эту команду]";
@@ -610,8 +611,9 @@ std::string execute_bash_blocks(const std::string &content) {
     if (blocks.empty()) return "";
     std::string combined;
     int total = (int)blocks.size();
+    bool local_autorun = false;
     for (int idx = 0; idx < total; ++idx) {
-        std::string result = execute_single_bash(blocks[idx], idx, total);
+        std::string result = execute_single_bash(blocks[idx], idx, total, local_autorun);
         if (!result.empty()) {
             if (!combined.empty()) combined += "\n---\n";
             if (total > 1) combined += "[Блок " + std::to_string(idx+1) + "]:\n";
@@ -843,6 +845,7 @@ void process_response(const std::string &content, bool aborted, size_t msgs_befo
         std::string combined_result;
         size_t cur = 0;
         int total = (int)bbs.size();
+        bool local_autorun = false;
 
         for (int i = 0; i < total; ++i) {
             // Текст до bash-блока
@@ -854,7 +857,7 @@ void process_response(const std::string &content, bool aborted, size_t msgs_befo
             std::cout << std::flush;
 
             // Выполняем
-            std::string res = execute_single_bash(bbs[i].code, i, total);
+            std::string res = execute_single_bash(bbs[i].code, i, total, local_autorun);
             if (!res.empty()) {
                 if (!combined_result.empty()) combined_result += "\n---\n";
                 if (total > 1) combined_result += "[Блок " + std::to_string(i+1) + "]:\n";
