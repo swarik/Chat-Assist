@@ -80,6 +80,7 @@ struct ChatSession {
     int               total_prompt_tokens     = 0;
     int               total_completion_tokens = 0;
     bool              autorun                 = false;
+    bool              history_enabled          = false;
 };
 
 static ChatSession G;
@@ -213,14 +214,47 @@ static std::vector<std::string> split_table_cells(const std::string &line) {
     return cells;
 }
 
-static void render_table_row(const std::vector<std::string> &cells) {
+// Визуальная ширина UTF-8 строки (без ANSI escape)
+static size_t visible_width(const std::string &s) {
+    size_t w = 0, i = 0;
+    while (i < s.size()) {
+        if (s[i] == '\033') {
+            ++i;
+            if (i < s.size() && s[i] == '[') {
+                ++i;
+                while (i < s.size() && s[i] != 'm') ++i;
+                if (i < s.size()) ++i;
+            }
+            continue;
+        }
+        unsigned char c = s[i];
+        if      (c <= 0x7F)          { w++; i += 1; }
+        else if ((c & 0xE0) == 0xC0) { w++; i += 2; }
+        else if ((c & 0xF0) == 0xE0) { w++; i += 3; }
+        else if ((c & 0xF8) == 0xF0) { w += 2; i += 4; }
+        else { i++; }
+    }
+    return w;
+}
+
+static std::vector<size_t> g_table_col_widths;
+
+static void render_table_row(const std::vector<std::string> &cells, bool is_header = false) {
     std::cout << C_GRAY << "\xe2\x94\x82" << C_RESET;
     for (size_t i = 0; i < cells.size(); ++i) {
-        std::cout << " " << render_inline_md(cells[i]) << "\t";
+        size_t col_w = (i < g_table_col_widths.size()) ? g_table_col_widths[i] : 12;
+        std::string rendered = render_inline_md(cells[i]);
+        size_t vis_w = visible_width(cells[i]);
+        size_t pad = (vis_w < col_w) ? (col_w - vis_w) : 0;
+        if (is_header)
+            std::cout << " " << C_BOLD << rendered << C_RESET << std::string(pad, ' ') << " ";
+        else
+            std::cout << " " << rendered << std::string(pad, ' ') << " ";
         std::cout << C_GRAY << "\xe2\x94\x82" << C_RESET;
     }
     std::cout << "\n";
 }
+
 
 static void render_markdown(const std::string &text) {
     std::istringstream ss(text);
@@ -321,26 +355,75 @@ static void render_markdown(const std::string &text) {
             }
         }
 
-        // ── Markdown таблицы ──
+        // ── Markdown таблицы (двухпроходный рендер) ──
         if (line.find('|') != std::string::npos) {
-            bool is_separator = true;
-            for (char c : line) if (c!='|' && c!='-' && c!=' ' && c!=':') { is_separator = false; break; }
-            
-            if (is_separator) {
-                auto sep_cells = split_table_cells(line);
-                std::cout << C_GRAY << "\xe2\x94\x9c";
-                for (size_t i = 0; i < sep_cells.size(); ++i) {
-                    std::cout << "\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80";
-                    std::cout << ((i + 1 < sep_cells.size()) ? "\xe2\x94\xbc" : "\xe2\x94\xa4");
+            auto first_cells = split_table_cells(line);
+            if (first_cells.size() >= 2) {
+                auto check_sep = [](const std::string &l) -> bool {
+                    bool has_dash = false;
+                    for (char c : l) {
+                        if (c == '-') has_dash = true;
+                        else if (c != '|' && c != ' ' && c != ':') return false;
+                    }
+                    return has_dash;
+                };
+                std::vector<std::vector<std::string>> table_rows;
+                std::vector<bool> is_sep_row;
+                table_rows.push_back(first_cells);
+                is_sep_row.push_back(check_sep(line));
+                std::string next_line;
+                bool has_leftover = false;
+                std::string leftover;
+                while (std::getline(ss, next_line)) {
+                    if (!next_line.empty() && next_line.back() == '\r') next_line.pop_back();
+                    if (next_line.find('|') == std::string::npos) {
+                        has_leftover = true; leftover = next_line; break;
+                    }
+                    auto nc = split_table_cells(next_line);
+                    if (nc.size() < 2) { has_leftover = true; leftover = next_line; break; }
+                    is_sep_row.push_back(check_sep(next_line));
+                    table_rows.push_back(nc);
+                }
+                size_t max_cols = 0;
+                for (auto &row : table_rows) if (row.size() > max_cols) max_cols = row.size();
+                g_table_col_widths.assign(max_cols, 0);
+                for (size_t ri = 0; ri < table_rows.size(); ++ri) {
+                    if (is_sep_row[ri]) continue;
+                    for (size_t ci = 0; ci < table_rows[ri].size(); ++ci) {
+                        size_t w = visible_width(table_rows[ri][ci]);
+                        if (w > g_table_col_widths[ci]) g_table_col_widths[ci] = w;
+                    }
+                }
+                for (auto &w : g_table_col_widths) if (w < 3) w = 3;
+                std::cout << C_GRAY << "\xe2\x94\x8c";
+                for (size_t ci = 0; ci < max_cols; ++ci) {
+                    for (size_t k = 0; k < g_table_col_widths[ci] + 2; ++k) std::cout << "\xe2\x94\x80";
+                    std::cout << ((ci + 1 < max_cols) ? "\xe2\x94\xac" : "\xe2\x94\x90");
                 }
                 std::cout << C_RESET << "\n";
-                continue;
-            }
-            
-            // Строка таблицы
-            auto cells = split_table_cells(line);
-            if (cells.size() >= 2) {
-                render_table_row(cells);
+                bool header_done = false;
+                for (size_t ri = 0; ri < table_rows.size(); ++ri) {
+                    if (is_sep_row[ri]) {
+                        std::cout << C_GRAY << "\xe2\x94\x9c";
+                        for (size_t ci = 0; ci < max_cols; ++ci) {
+                            for (size_t k = 0; k < g_table_col_widths[ci] + 2; ++k) std::cout << "\xe2\x94\x80";
+                            std::cout << ((ci + 1 < max_cols) ? "\xe2\x94\xbc" : "\xe2\x94\xa4");
+                        }
+                        std::cout << C_RESET << "\n";
+                        header_done = true;
+                        continue;
+                    }
+                    render_table_row(table_rows[ri], !header_done);
+                }
+                std::cout << C_GRAY << "\xe2\x94\x94";
+                for (size_t ci = 0; ci < max_cols; ++ci) {
+                    for (size_t k = 0; k < g_table_col_widths[ci] + 2; ++k) std::cout << "\xe2\x94\x80";
+                    std::cout << ((ci + 1 < max_cols) ? "\xe2\x94\xb4" : "\xe2\x94\x98");
+                }
+                std::cout << C_RESET << "\n";
+                if (has_leftover && !leftover.empty()) {
+                    std::cout << render_inline_md(leftover) << "\n";
+                }
                 continue;
             }
         }
@@ -468,55 +551,74 @@ std::string exec_with_timeout(const std::string& cmd, int timeout_sec) {
 }
 
 // ─────────────────────────── Парсинг bash-команды ────────────
-std::string for_com_parse(const std::string &content) {
+// Парсит все ```bash блоки из ответа
+std::vector<std::string> parse_bash_blocks(const std::string &content) {
+    std::vector<std::string> blocks;
     const std::string open_tag = "```bash";
-    std::string::size_type cnt_start = content.find(open_tag);
-    if (cnt_start == std::string::npos) return "";
-
-    std::string::size_type search_from = cnt_start + open_tag.size();
-    std::string::size_type cnt_end = std::string::npos;
-
-    while (search_from < content.size()) {
-        std::string::size_type pos = content.find("```", search_from);
-        if (pos == std::string::npos) break;
-        std::string::size_type after = pos + 3;
-        if (after >= content.size() || content[after] == '\n' ||
-            content[after] == '\r'  || content[after] == ' ') {
-            cnt_end = pos;
-            break;
+    std::string::size_type pos = 0;
+    while (pos < content.size()) {
+        auto cnt_start = content.find(open_tag, pos);
+        if (cnt_start == std::string::npos) break;
+        auto search_from = cnt_start + open_tag.size();
+        std::string::size_type cnt_end = std::string::npos;
+        while (search_from < content.size()) {
+            auto p = content.find("```", search_from);
+            if (p == std::string::npos) break;
+            auto after = p + 3;
+            if (after >= content.size() || content[after] == '\n' ||
+                content[after] == '\r'  || content[after] == ' ') {
+                cnt_end = p; break;
+            }
+            search_from = p + 3;
         }
-        search_from = pos + 3;
+        if (cnt_end == std::string::npos) break;
+        blocks.push_back(content.substr(cnt_start + open_tag.size(),
+                                        cnt_end - (cnt_start + open_tag.size())));
+        pos = cnt_end + 3;
     }
-    if (cnt_end == std::string::npos) return "";
+    return blocks;
+}
 
-    std::string com_cont = content.substr(cnt_start + open_tag.size(),
-                                          cnt_end - (cnt_start + open_tag.size()));
-
+// Выполняет один bash-блок с подтверждением
+std::string execute_single_bash(const std::string &bash_code, int idx, int total) {
+    if (total > 1)
+        std::cout << C_YELLOW << "[Bash блок " << (idx+1) << "/" << total << "]" << C_RESET << std::endl;
     if (!G.autorun) {
-        char *rl_confirm = readline(C_YELLOW "[Выполнить команду? (y/n|д/н)]: " C_RESET);
-        if (!rl_confirm) return "";
-        std::string confirm(rl_confirm);
-        free(rl_confirm);
-        if (confirm != "y" && confirm != "Y" && confirm != "д" && confirm != "Д") {
-            std::cout << C_RED << "[Выполнение отменено пользователем]" << C_RESET << std::endl;
-            return "";
+        char *rl = readline(C_YELLOW "[Выполнить команду? (y/n/a-все|д/н/в)]: " C_RESET);
+        if (!rl) return "[Пользователь отказался выполнять эту команду]";
+        std::string ans(rl); free(rl);
+        if (ans == "a" || ans == "A" || ans == "в" || ans == "В") {
+            G.autorun = true;
+        } else if (ans != "y" && ans != "Y" && ans != "д" && ans != "Д") {
+            std::cout << C_RED << "[Блок " << (idx+1) << " пропущен]" << C_RESET << std::endl;
+            return "[Пользователь отказался выполнять эту команду]";
         }
+    } else if (total > 1) {
+        std::cout << C_YELLOW << "[Autorun: выполняю блок " << (idx+1) << "]" << C_RESET << std::endl;
     } else {
         std::cout << C_YELLOW << "[Autorun: выполняю автоматически]" << C_RESET << std::endl;
     }
-    // БАГ 8: предупреждаем если в ответе несколько bash-блоков (выполняется только первый)
-    {
-        size_t second = content.find("```bash", cnt_start + open_tag.size());
-        if (second != std::string::npos) {
-            std::cout << C_YELLOW
-                      << "[Внимание: в ответе несколько bash-блоков, выполняется только первый]"
-                      << C_RESET << std::endl;
-        }
-    }
     std::cout << C_YELLOW << "[Выполняю...]" << C_RESET << std::endl;
-    std::string result = exec_with_timeout(com_cont, CMD_TIMEOUT);
+    std::string result = exec_with_timeout(bash_code, CMD_TIMEOUT);
     std::cout << C_BLUE << "[Результат]:\n" << result << C_RESET << std::endl;
     return result;
+}
+
+// Обёртка совместимости
+std::string execute_bash_blocks(const std::string &content) {
+    auto blocks = parse_bash_blocks(content);
+    if (blocks.empty()) return "";
+    std::string combined;
+    int total = (int)blocks.size();
+    for (int idx = 0; idx < total; ++idx) {
+        std::string result = execute_single_bash(blocks[idx], idx, total);
+        if (!result.empty()) {
+            if (!combined.empty()) combined += "\n---\n";
+            if (total > 1) combined += "[Блок " + std::to_string(idx+1) + "]:\n";
+            combined += result;
+        }
+    }
+    return combined;
 }
 
 // ─────────────────────────── Спиннер ─────────────────────────
@@ -670,67 +772,134 @@ std::string do_api_request(bool &aborted) {
 void process_response(const std::string &content, bool aborted, size_t msgs_before = 0) {
     if (content.empty()) return;
 
-    // Красивый вывод
-    std::cout << "\n" << C_BOLD << C_CYAN << "[Ассистент]:" << C_RESET << "\n";
-    render_markdown(content);
-    std::cout << std::endl;
-
     if (aborted) {
-        char *rl_ans = readline(C_YELLOW "[Ответ был прерван. Сохранить частичный ответ в историю? (y/n)]: " C_RESET);
+        std::cout << "\n" << C_BOLD << C_CYAN << "[Ассистент]:" << C_RESET << "\n";
+        render_markdown(content);
+        std::cout << std::endl;
+        char *rl_ans = readline(C_YELLOW "[Ответ прерван. Сохранить в историю? (y/n)]: " C_RESET);
         std::string ans;
         if (rl_ans) { ans = std::string(rl_ans); free(rl_ans); }
         if (ans != "y" && ans != "Y" && ans != "д" && ans != "Д") {
             if (msgs_before > 0 && msgs_before <= G.messages.size()) {
                 G.messages.resize(msgs_before);
-                std::cout << C_GRAY << "[История откачена к состоянию до запроса]"
-                          << C_RESET << std::endl;
             } else if (!G.messages.empty() && G.messages.back()["role"] == "user") {
                 G.messages.pop_back();
-                std::cout << C_GRAY << "[Вопрос и частичный ответ удалены из истории]"
-                          << C_RESET << std::endl;
             }
+            std::cout << C_GRAY << "[Частичный ответ отброшен]" << C_RESET << std::endl;
             return;
         }
+        G.messages.push_back({{"role", "assistant"}, {"content", content}});
+        return;
     }
 
-    // Сохраняем ответ ассистента в историю
+    // ── Ищем bash-блоки в ответе ──
+    const std::string open_tag = "```bash";
+
+    auto find_closing = [](const std::string &text, size_t from) -> size_t {
+        size_t pos = from;
+        while (pos < text.size()) {
+            auto p = text.find("```", pos);
+            if (p == std::string::npos) return std::string::npos;
+            auto after = p + 3;
+            if (after >= text.size() || text[after] == '\n' ||
+                text[after] == '\r'  || text[after] == ' ') {
+                return p;
+            }
+            pos = p + 3;
+        }
+        return std::string::npos;
+    };
+
+    struct BBlock { size_t tag_s, code_s, code_e, blk_e; std::string code; };
+    auto find_bash_blocks = [&](const std::string &text) {
+        std::vector<BBlock> bbs;
+        size_t pos = 0;
+        while (pos < text.size()) {
+            auto ts = text.find(open_tag, pos);
+            if (ts == std::string::npos) break;
+            auto cs = ts + open_tag.size();
+            auto ce = find_closing(text, cs);
+            if (ce == std::string::npos) break;
+            auto be = ce + 3;
+            if (be < text.size() && text[be] == '\n') be++;
+            bbs.push_back({ts, cs, ce, be, text.substr(cs, ce - cs)});
+            pos = be;
+        }
+        return bbs;
+    };
+
+    // ── Функция: вывести ответ по частям, останавливаясь на bash-блоках ──
+    auto render_and_execute = [&](const std::string &text) -> std::string {
+        auto bbs = find_bash_blocks(text);
+        if (bbs.empty()) {
+            std::cout << "\n" << C_BOLD << C_CYAN << "[Ассистент]:" << C_RESET << "\n";
+            render_markdown(text);
+            std::cout << std::endl;
+            return "";
+        }
+
+        std::cout << "\n" << C_BOLD << C_CYAN << "[Ассистент]:" << C_RESET << "\n";
+
+        std::string combined_result;
+        size_t cur = 0;
+        int total = (int)bbs.size();
+
+        for (int i = 0; i < total; ++i) {
+            // Текст до bash-блока
+            if (bbs[i].tag_s > cur) {
+                render_markdown(text.substr(cur, bbs[i].tag_s - cur));
+            }
+            // Сам bash-блок (визуально)
+            render_markdown(text.substr(bbs[i].tag_s, bbs[i].blk_e - bbs[i].tag_s));
+            std::cout << std::flush;
+
+            // Выполняем
+            std::string res = execute_single_bash(bbs[i].code, i, total);
+            if (!res.empty()) {
+                if (!combined_result.empty()) combined_result += "\n---\n";
+                if (total > 1) combined_result += "[Блок " + std::to_string(i+1) + "]:\n";
+                combined_result += res;
+            }
+            cur = bbs[i].blk_e;
+        }
+
+        // Текст после последнего блока
+        if (cur < text.size()) {
+            render_markdown(text.substr(cur));
+        }
+        std::cout << std::endl;
+        return combined_result;
+    };
+
+    // ── Основная логика ──
+    std::string cmd_result = render_and_execute(content);
     G.messages.push_back({{"role", "assistant"}, {"content", content}});
 
-    if (aborted) return;
-
-    // Цикл выполнения bash-команд из ответов (до MAX_BASH_CHAIN итераций)
+    // Цикл: если были bash-результаты, отправляем модели
     const int MAX_BASH_CHAIN = 7;
-    std::string current_content = content;
-    for (int chain = 0; chain < MAX_BASH_CHAIN; ++chain) {
-        std::string cmd_result = for_com_parse(current_content);
-        if (cmd_result.empty()) break;
-
+    for (int chain = 0; chain < MAX_BASH_CHAIN && !cmd_result.empty(); ++chain) {
         G.messages.push_back({{"role", "user"},
             {"content", "[Результат выполнения команды]:\n" + cmd_result}});
 
         bool chain_aborted = false;
-        std::string next_content = do_api_request(chain_aborted);
-        if (next_content.empty()) break;
-
-        std::cout << "\n" << C_BOLD << C_CYAN << "[Ассистент]:" << C_RESET << "\n";
-        render_markdown(next_content);
-        std::cout << std::endl;
+        std::string next = do_api_request(chain_aborted);
+        if (next.empty()) break;
 
         if (chain_aborted) {
-            std::cout << C_YELLOW << "[Ответ прерван, не сохранён]"
-                      << C_RESET << std::endl;
+            std::cout << "\n" << C_BOLD << C_CYAN << "[Ассистент]:" << C_RESET << "\n";
+            render_markdown(next);
+            std::cout << "\n" << C_YELLOW << "[Ответ прерван]" << C_RESET << std::endl;
             break;
         }
 
-        G.messages.push_back({{"role", "assistant"}, {"content", next_content}});
-        current_content = next_content;
+        cmd_result = render_and_execute(next);
+        G.messages.push_back({{"role", "assistant"}, {"content", next}});
     }
 
-    // Автосохранение каждые 10 сообщений
-    if (G.messages.size() >= 10 && G.messages.size() % 10 == 0) {
-        save_history();
-    }
+    // Автосохранение
+    if (G.messages.size() >= 10 && G.messages.size() % 10 == 0) save_history();
 }
+
 
 // ─────────────────────────── Сигнал / выход ──────────────────
 void do_exit() {
@@ -743,9 +912,11 @@ void do_exit() {
         std::this_thread::sleep_for(std::chrono::milliseconds(150));
     }
     
-    std::cout << "\n" << C_YELLOW << "[Сохраняю историю перед выходом...]" << C_RESET << std::endl;
-    save_history();
-    write_history(READLINE_HIST_FILE.c_str());
+    if (G.history_enabled) {
+        std::cout << "\n" << C_YELLOW << "[Сохраняю историю...]" << C_RESET << std::endl;
+        save_history();
+        write_history(READLINE_HIST_FILE.c_str());
+    }
     curl_global_cleanup();
     std::cout << C_YELLOW << "[Выход.]" << C_RESET << std::endl;
     exit(0);
@@ -809,7 +980,7 @@ void print_help() {
         << "  /save              — сохранить историю\n"
         << "  /load              — загрузить историю\n"
         << "  /clear             — очистить историю диалога\n"
-        << "  /history           — показать историю\n"
+        << "  /history [on|off]  — показать историю / вкл-выкл сохранение\n"
         << "  /delete N          — удалить сообщение N из истории\n"
         << "  /retry             — повторить последний запрос\n"
         << "  /tokens            — показать использование токенов\n"
@@ -823,9 +994,9 @@ void print_help() {
         << "  /help              — эта справка\n"
         << "  /exit              — выход\n"
         << "\nМногострочный ввод:\n"
-        << "  Enter              — новая строка (продолжение ввода)\n"
+        << "  Пустой Enter      — отправить сообщение\n"
         << "  //                 — отправить сообщение (конец ввода)\n"
-        << "  Пустая строка      — отправить однострочное сообщение\n"
+        << "  .                  — вставить пустую строку\n"
         << "\nВо время получения ответа:\n"
         << "  Ctrl+C             — прервать вывод ответа\n"
         << C_RESET;
@@ -990,44 +1161,24 @@ void print_cost() {
     double prompt_cost = (G.total_prompt_tokens / 1000000.0) * p_price;
     double completion_cost = (G.total_completion_tokens / 1000000.0) * c_price;
     double total_cost = prompt_cost + completion_cost;
+    int total_tokens = G.total_prompt_tokens + G.total_completion_tokens;
 
-    std::cout << C_MAGENTA << "\n╔══════════════════════════════════════╗\n";
-    std::cout << "║       Использование токенов          ║\n";
-    std::cout << "╠══════════════════════════════════════╣\n";
-    std::cout << "║  Модель:     " << G.model;
-    // Паддинг
-    int pad = 24 - (int)G.model.size();
-    for (int i = 0; i < pad; ++i) std::cout << " ";
-    if (pad < 0) std::cout << "\n║              ";
-    std::cout << "║\n";
-    std::cout << "║  Промпт:     ";
-    printf("%8d токенов", G.total_prompt_tokens);
-    std::cout << "       ║\n";
-    std::cout << "║  Ответы:     ";
-    printf("%8d токенов", G.total_completion_tokens);
-    std::cout << "       ║\n";
-    std::cout << "║  Всего:      ";
-    printf("%8d токенов", G.total_prompt_tokens + G.total_completion_tokens);
-    std::cout << "       ║\n";
+    std::cout << C_MAGENTA << "\n  Использование токенов" << C_RESET << "\n";
+    std::cout << C_GRAY << "  ────────────────────────────────" << C_RESET << "\n";
+    std::cout << C_MAGENTA << "  Модель:\t" << C_RESET << G.model << "\n";
+    std::cout << C_MAGENTA << "  Промпт:\t" << C_RESET << G.total_prompt_tokens << " токенов\n";
+    std::cout << C_MAGENTA << "  Ответы:\t" << C_RESET << G.total_completion_tokens << " токенов\n";
+    std::cout << C_MAGENTA << "  Всего:\t" << C_RESET << total_tokens << " токенов\n";
     if (found) {
-        std::cout << "╠══════════════════════════════════════╣\n";
-        std::cout << "║  Промпт:     ";
-        printf("$%-8.4f", prompt_cost);
-        std::cout << "              ║\n";
-        std::cout << "║  Ответы:     ";
-        printf("$%-8.4f", completion_cost);
-        std::cout << "              ║\n";
-        std::cout << "║  Итого:      ";
-        printf("$%-8.4f", total_cost);
-        std::cout << "              ║\n";
-        std::cout << "║  (";
-        printf("$%.2f/$%.2f", p_price, c_price);
-        std::cout << " за 1M токенов)     ║\n";
+        std::cout << C_GRAY << "  ────────────────────────────────" << C_RESET << "\n";
+        printf("  Промпт:\t$%.4f\n", prompt_cost);
+        printf("  Ответы:\t$%.4f\n", completion_cost);
+        printf("  Итого:\t$%.4f\n", total_cost);
+        printf("  ($%.2f/$%.2f за 1M токенов)\n", p_price, c_price);
     } else {
-        std::cout << "╠══════════════════════════════════════╣\n";
-        std::cout << "║  Цены для модели не найдены          ║\n";
+        std::cout << C_GRAY << "\n  Цены для модели не найдены" << C_RESET << "\n";
     }
-    std::cout << "╚══════════════════════════════════════╝" << C_RESET << std::endl;
+    std::cout << std::endl;
 }
 
 // ─────────────────────────── Ввод пользователя ───────────────
@@ -1050,7 +1201,7 @@ static bool get_user_input(std::string &out) {
             // EOF (Ctrl+D)
             if (!result.empty()) {
                 out = result;
-                add_history(result.size() <= 500
+                if (G.history_enabled) add_history(result.size() <= 500
                     ? result.c_str()
                     : (result.substr(0, 500) + "...").c_str());
                 return true;
@@ -1086,7 +1237,7 @@ static bool get_user_input(std::string &out) {
             first_line = false;
             line_num   = 2;
             std::cout << C_GRAY
-                      << "[Многострочный режим: Enter — новая строка, '.' — пустая строка, '//' — отправить]"
+                      << "[Многострочный режим: пустой Enter — отправить, '.' — пустая строка, '//' — отправить]"
                       << C_RESET << std::endl;
         } else {
             // Пустая строка в многострочном режиме — отправляем
@@ -1105,8 +1256,10 @@ static bool get_user_input(std::string &out) {
     }
 
     if (!result.empty()) {
-        std::string hist = result.size() > 500 ? result.substr(0, 500) + "..." : result;
-        add_history(hist.c_str());
+        if (G.history_enabled) {
+            std::string hist = result.size() > 500 ? result.substr(0, 500) + "..." : result;
+            add_history(hist.c_str());
+        }
     }
 
     out = result;
@@ -1143,10 +1296,10 @@ int main(int argc, char *argv[]) {
         G.sys_prompt =
             "То, что ты выведешь после ```bash будет сразу исполняться в системе через функцию system();. "
             "Используй максимально аккуратно, чтобы не навредить системе !!! "
-            "Всегда придерживайся правила: только одна вставка на bash может быть в твоем ответе. "
+            "Всегда придерживайся правила: несколько bash-блоков могут быть в твоём ответе, все будут выполнены последовательно. "
+            "При выводе тобой bash-блока ничего больше не выводить, пока я не разрешу или не разрешу."
             "Все инструкции, что указаны здесь выше ты должен постоянно помнить и не нарушать. "
-            "ЭТО ВАЖНО! Результат выполнения команды будет добавлено к твоему сообщению автоматически. "
-            "Таблицы оформлять табами (TAB), а не markdown-таблицами, т.к. вертикальные столбцы смещаются из-за шрифта. "
+            "ЭТО ВАЖНО! Результат выполнения команды будет добавлен к твоему сообщению автоматически. "
             "В папке ~/tmp возможно будет файл memo.md это твоя память. "
             "Если необходимо сделать запись в memo.md, то сохраняй самое важное, максимум три - пять строк, ДОПИСЫВАЯ в файл.";
     }
@@ -1200,12 +1353,14 @@ int main(int argc, char *argv[]) {
     std::cout << C_YELLOW << "Введите /help для справки" << C_RESET << std::endl;
     std::cout << C_GRAY   << "Autorun: " << (G.autorun ? "вкл" : "выкл")
               << " (переключить: /autorun)" << C_RESET << std::endl;
-    std::cout << C_GRAY   << "Подсказка: Enter — новая строка, '//' — отправить, "
+    std::cout << C_GRAY   << "История: " << (G.history_enabled ? "вкл" : "выкл")
+              << " (переключить: /history on|off)" << C_RESET << std::endl;
+    std::cout << C_GRAY   << "Подсказка: пустой Enter — отправить, '//' — отправить, "
                              "Ctrl+C во время ответа — прервать"
               << C_RESET << std::endl;
 
     using_history();
-    read_history(READLINE_HIST_FILE.c_str());
+    if (G.history_enabled) read_history(READLINE_HIST_FILE.c_str());
 
     while (true) {
         if (g_exit_requested) do_exit();
@@ -1219,9 +1374,35 @@ int main(int argc, char *argv[]) {
 
         // ── Специальные команды ──
         if (userAnswer == "/help")    { print_help();    continue; }
-        if (userAnswer == "/save")    { save_history();  continue; }
-        if (userAnswer == "/load")    { load_history();  continue; }
-        if (userAnswer == "/history") { print_history(); continue; }
+        if (userAnswer == "/save") {
+            if (!G.history_enabled) {
+                std::cout << C_YELLOW << "[История отключена. Включите: /history on]" << C_RESET << std::endl;
+            } else {
+                save_history();
+            }
+            continue;
+        }
+        if (userAnswer == "/load") {
+            if (!G.history_enabled) {
+                std::cout << C_YELLOW << "[История отключена. Включите: /history on]" << C_RESET << std::endl;
+            } else {
+                load_history();
+            }
+            continue;
+        }
+        if (match_command(userAnswer, "/history")) {
+            std::string arg = command_arg(userAnswer, "/history");
+            if (arg == "on") {
+                G.history_enabled = true;
+                std::cout << C_YELLOW << "[История: ВКЛЮЧЕНА]" << C_RESET << std::endl;
+            } else if (arg == "off") {
+                G.history_enabled = false;
+                std::cout << C_YELLOW << "[История: ВЫКЛЮЧЕНА]" << C_RESET << std::endl;
+            } else {
+                print_history();
+            }
+            continue;
+        }
         if (userAnswer == "/tokens")  { print_tokens();  continue; }
         if (userAnswer == "/cost")    { print_cost();    continue; }
         if (userAnswer == "/autorun") {
