@@ -54,7 +54,7 @@ static std::string get_home_dir() {
 #define DEFAULT_MAX_TOKENS  4096
 
 // ─────────────────────────── Версия ───────────────────────────
-#define APP_VERSION "1.0"
+#define APP_VERSION "1.01"
 
 
 static std::string HISTORY_FILE;
