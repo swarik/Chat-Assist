@@ -1,4 +1,5 @@
 #include <iostream>
+#include <iomanip>
 #include <sys/ioctl.h>
 #include <unistd.h>
 #include <fstream>
@@ -47,9 +48,14 @@ static std::string get_home_dir() {
 // ─────────────────────────── Константы ───────────────────────
 #define CMD_TIMEOUT         250
 #define MAX_CMD_OUTPUT      50000
-#define MAX_MESSAGES        200
+
+#define MAX_MESSAGES        500
 #define DEFAULT_TEMPERATURE 0.7
-#define DEFAULT_MAX_TOKENS  4960
+#define DEFAULT_MAX_TOKENS  4096
+
+// ─────────────────────────── Версия ───────────────────────────
+#define APP_VERSION "1.0"
+
 
 static std::string HISTORY_FILE;
 static std::string SYSTEM_PROMPT_FILE;
@@ -904,6 +910,230 @@ void process_response(const std::string &content, bool aborted, size_t msgs_befo
 }
 
 
+// ─────────────────────────── Команды ──────────────────────────
+void cmd_update() {
+    std::string home = get_home_dir();
+    std::string url = "https://raw.githubusercontent.com/swarik/Chat-Assist/main/sw_chat.cpp";
+    std::string new_src = home + "/tmp/sw_chat_new.cpp";
+    std::string new_bin = home + "/tmp/sw_chat_new";
+    std::string cur_bin = home + "/sw_chat";
+
+    // 1. Скачать новый исходник
+    std::cout << C_YELLOW << "[update] Скачиваю обновление..." << C_RESET << std::endl;
+
+    CURL *curl = curl_easy_init();
+    if (!curl) {
+        std::cerr << C_RED << "[update: curl init failed]" << C_RESET << std::endl;
+        return;
+    }
+
+    std::string src_body;
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &src_body);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+
+    CURLcode res = curl_easy_perform(curl);
+    long http_code = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+    curl_easy_cleanup(curl);
+
+    if (res != CURLE_OK) {
+        std::cerr << C_RED << "[update: download failed: " << curl_easy_strerror(res) << "]" << C_RESET << std::endl;
+        return;
+    }
+    if (http_code != 200) {
+        std::cerr << C_RED << "[update: HTTP " << http_code << "]" << C_RESET << std::endl;
+        return;
+    }
+    if (src_body.size() < 100) {
+        std::cerr << C_RED << "[update: файл слишком маленький, прерывание]" << C_RESET << std::endl;
+        return;
+    }
+
+    // 2. Проверить версию — извлечь APP_VERSION из скачанного файла
+    auto extract_version = [](const std::string& src) -> std::string {
+        std::string marker = "#define APP_VERSION \"";
+        size_t pos = src.find(marker);
+        if (pos == std::string::npos) return "";
+        pos += marker.size();
+        size_t end = src.find("\"", pos);
+        if (end == std::string::npos) return "";
+        return src.substr(pos, end - pos);
+    };
+
+    // Сравнение версий "1.2.3" > "1.0.3" и т.д.
+    auto version_greater = [](const std::string& remote, const std::string& local) -> bool {
+        auto split = [](const std::string& s) {
+            std::vector<int> parts;
+            std::stringstream ss(s);
+            std::string token;
+            while (std::getline(ss, token, '.')) parts.push_back(std::stoi(token));
+            return parts;
+        };
+        auto rv = split(remote);
+        auto lv = split(local);
+        size_t n = std::max(rv.size(), lv.size());
+        while (rv.size() < n) rv.push_back(0);
+        while (lv.size() < n) lv.push_back(0);
+        for (size_t i = 0; i < n; i++) {
+            if (rv[i] > lv[i]) return true;
+            if (rv[i] < lv[i]) return false;
+        }
+        return false;
+    };
+
+    std::string remote_ver = extract_version(src_body);
+    std::string local_ver  = APP_VERSION;
+
+    std::cout << C_GRAY << "[update] Локальная версия:  " << local_ver << C_RESET << std::endl;
+    std::cout << C_GRAY << "[update] Удалённая версия: " << remote_ver << C_RESET << std::endl;
+
+    if (remote_ver.empty()) {
+        std::cerr << C_RED << "[update: не удалось определить версию на сервере]" << C_RESET << std::endl;
+        return;
+    }
+
+    if (!version_greater(remote_ver, local_ver)) {
+        std::cout << C_GREEN << "[update] Уже последняя версия (" << local_ver << ")!" << C_RESET << std::endl;
+        return;
+    }
+
+    std::cout << C_YELLOW << "[update] Доступна новая версия: " << remote_ver << C_RESET << std::endl;
+
+    // 3. Сохранить новый исходник
+    {
+        std::ofstream out(new_src);
+        if (!out.is_open()) {
+            std::cerr << C_RED << "[update: не удалось сохранить " << new_src << "]" << C_RESET << std::endl;
+            return;
+        }
+        out << src_body;
+        out.close();
+    }
+
+    // 4. Скомпилировать
+    std::cout << C_YELLOW << "[update] Компиляция..." << C_RESET << std::endl;
+    std::string compile_cmd = "g++ -std=c++17 -O2 -I" + home + "/.local/include -o "
+        + new_bin + " " + new_src + " -lreadline -lcurl 2>&1";
+    std::string compile_out;
+    {
+        FILE *pipe = popen(compile_cmd.c_str(), "r");
+        if (pipe) {
+            char buf[256];
+            while (fgets(buf, sizeof(buf), pipe)) compile_out += buf;
+            int status = pclose(pipe);
+            if (status != 0) {
+                std::cerr << C_RED << "[update: компиляция не удалась]" << C_RESET << std::endl;
+                std::cerr << compile_out << std::endl;
+                return;
+            }
+        }
+    }
+
+    // 5. Проверить что бинарник создан
+    if (access(new_bin.c_str(), X_OK) != 0) {
+        std::cerr << C_RED << "[update: бинарник не создан]" << C_RESET << std::endl;
+        return;
+    }
+
+    // 6. Сохранить историю перед рестартом
+    std::cout << C_YELLOW << "[update] Сохраняю историю..." << C_RESET << std::endl;
+    save_history();
+
+    // 7. Заменить старые файлы (mv атомарно, не блокируется запущенным процессом)
+    std::string old_bin = cur_bin + ".old";
+    std::string mv_cmd = "mv " + cur_bin + " " + old_bin + " && "
+        + "mv " + new_bin + " " + cur_bin + " && chmod +x " + cur_bin + " && "
+        + "mv " + new_src + " " + home + "/sw_chat.cpp && "
+        + "rm -f " + old_bin;
+    int mv_res = system(mv_cmd.c_str());
+    if (mv_res != 0) {
+        std::cerr << C_RED << "[update: не удалось заменить файлы]" << C_RESET << std::endl;
+        return;
+    }
+
+    std::cout << C_GREEN << C_BOLD << "[update] Обновление установлено! Перезапуск..." << C_RESET << std::endl;
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+    // 9. exec — заменить текущий процесс
+    execl(cur_bin.c_str(), cur_bin.c_str(), "--restore-session", (char*)NULL);
+
+    // Если execl не сработал
+    std::cerr << C_RED << "[update: exec failed]" << C_RESET << std::endl;
+}
+
+void cmd_balance() {
+    std::string api_key = get_api_key();
+    if (api_key.empty()) return;
+
+    CURL *curl = curl_easy_init();
+    if (!curl) {
+        std::cerr << C_RED << "[balance: curl init failed]" << C_RESET << std::endl;
+        return;
+    }
+
+    std::string response_body;
+    std::string auth = "Authorization: Bearer " + api_key;
+    struct curl_slist *headers = nullptr;
+    headers = curl_slist_append(headers, auth.c_str());
+
+    curl_easy_setopt(curl, CURLOPT_URL, "https://openrouter.ai/api/v1/credits");
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response_body);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 15L);
+
+    CURLcode res = curl_easy_perform(curl);
+    long http_code = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+    curl_slist_free_all(headers);
+    curl_easy_cleanup(curl);
+
+    if (res != CURLE_OK) {
+        std::cerr << C_RED << "[balance: curl failed: " << curl_easy_strerror(res) << "]" << C_RESET << std::endl;
+        return;
+    }
+
+    if (http_code != 200) {
+        std::cerr << C_RED << "[balance: HTTP " << http_code << "]" << std::endl << response_body << C_RESET << std::endl;
+        return;
+    }
+
+    try {
+        json j = json::parse(response_body);
+        json data = j.contains("data") ? j["data"] : j;
+
+        double total_credits = data.value("total_credits", 0.0);
+        double total_usage   = data.value("total_usage", 0.0);
+        double remaining     = total_credits - total_usage;
+
+        std::cout << C_CYAN << C_BOLD << "  === OpenRouter Balance ===" << C_RESET << std::endl;
+        std::cout << "  Credits:  " << C_GREEN << "$" << std::fixed << std::setprecision(4) << total_credits << C_RESET << std::endl;
+        std::cout << "  Used:     " << C_YELLOW << "$" << total_usage << C_RESET << std::endl;
+        std::cout << "  Remain:   " << (remaining > 1.0 ? C_GREEN : C_RED) << "$" << remaining << C_RESET << std::endl;
+    } catch (const std::exception& e) {
+        std::cerr << C_RED << "[balance: parse error: " << e.what() << "]" << std::endl << "Raw: " << response_body << C_RESET << std::endl;
+    }
+}
+
+
+
+// ─────────────────────────── Команда /about ──────────────────
+void cmd_about() {
+    std::cout << C_CYAN << C_BOLD << "  === Chat CLI ===" << C_RESET << std::endl;
+    std::cout << "  Версия:   " << C_GREEN << APP_VERSION << C_RESET << std::endl;
+    std::cout << "  Модель:   " << C_GREEN << G.model << C_RESET << std::endl;
+    std::cout << "  Temp:     " << C_GREEN << G.temperature << C_RESET << std::endl;
+    std::cout << "  Max tok:  " << C_GREEN << G.max_tokens << C_RESET << std::endl;
+    std::cout << "  Autorun:  " << (G.autorun ? C_GREEN "вкл" : C_RED "выкл") << C_RESET << std::endl;
+    std::cout << "  History:  " << (G.history_enabled ? C_GREEN "вкл" : C_RED "выкл") << C_RESET << std::endl;
+    std::cout << "  Msgs:     " << C_GREEN << G.messages.size() << C_RESET << std::endl;
+    std::cout << "  Tokens:   " << C_GREEN << G.total_prompt_tokens << C_RESET << " prompt + "
+              << C_GREEN << G.total_completion_tokens << C_RESET << " completion" << std::endl;
+}
+
 // ─────────────────────────── Сигнал / выход ──────────────────
 void do_exit() {
     g_exit_requested = 1;
@@ -994,6 +1224,9 @@ void print_help() {
         << "  /file <path> [msg] — загрузить файл и задать вопрос\n"
         << "  /autorun           — вкл/выкл авто-выполнение bash\n"
         << "  /cost              — стоимость токенов в $\n"
+        << "  /balance           — проверить баланс OpenRouter\n"
+        << "  /update            — обновление программы\n"
+        << "  /about             — информация о программе\n"
         << "  /help              — эта справка\n"
         << "  /exit              — выход\n"
         << "\nМногострочный ввод:\n"
@@ -1310,6 +1543,19 @@ int main(int argc, char *argv[]) {
 
     curl_global_init(CURL_GLOBAL_ALL);
 
+    // ── Проверка --restore-session после обновления ──
+    bool restore_session = false;
+    for (int i = 1; i < argc; i++) {
+        if (std::string(argv[i]) == "--restore-session") {
+            restore_session = true;
+            break;
+        }
+    }
+    if (restore_session) {
+        load_history();
+        std::cout << C_GREEN << "[update] Сессия восстановлена (" << G.messages.size() - 1 << " сообщений)" << C_RESET << std::endl;
+    }
+
     // ── Режим пайпа / аргументов ──
     bool pipe_mode = !isatty(fileno(stdin));
     bool has_args  = argc > 1;
@@ -1415,6 +1661,10 @@ int main(int argc, char *argv[]) {
                       << "]" << C_RESET << std::endl;
             continue;
         }
+        if (userAnswer == "/update")  { cmd_update();  continue; }
+        if (userAnswer == "/balance") { cmd_balance(); continue; }
+        if (userAnswer == "/about")   { cmd_about();   continue; }
+
         if (userAnswer == "/exit")    { do_exit(); }
         if (userAnswer == "/system")  {
             std::cout << C_MAGENTA << "[Системный промпт]:\n"
@@ -1457,7 +1707,8 @@ int main(int argc, char *argv[]) {
             // Очищаем экран терминала
             std::cout << "\033[2J\033[H" << std::flush;
             std::cout << C_BOLD << C_CYAN << "=== Chat CLI ===" << C_RESET << std::endl;
-            std::cout << C_YELLOW << "Модель: " << G.model << C_RESET << std::endl;
+
+    std::cout << C_YELLOW << "Модель: " << G.model << C_RESET << std::endl;
             std::cout << C_YELLOW << "[История очищена, экран очищен]" << C_RESET << std::endl;
             continue;
         } else if (match_command(userAnswer, "/delete")) {
