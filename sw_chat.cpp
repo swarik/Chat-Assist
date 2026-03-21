@@ -46,10 +46,10 @@ static std::string get_home_dir() {
 
 // ─────────────────────────── Константы ───────────────────────
 #define CMD_TIMEOUT         250
-#define MAX_CMD_OUTPUT      196000
-#define MAX_MESSAGES        500
+#define MAX_CMD_OUTPUT      50000
+#define MAX_MESSAGES        200
 #define DEFAULT_TEMPERATURE 0.7
-#define DEFAULT_MAX_TOKENS  52000
+#define DEFAULT_MAX_TOKENS  4960
 
 static std::string HISTORY_FILE;
 static std::string SYSTEM_PROMPT_FILE;
