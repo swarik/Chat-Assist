@@ -1,4 +1,5 @@
 #include <iostream>
+#include <unordered_set>
 #include <iomanip>
 #include <sys/ioctl.h>
 #include <unistd.h>
@@ -18,6 +19,66 @@
 #include "nlohmann/json.hpp"
 
 using json = nlohmann::json;
+// Emoji codepoints где glibc wcwidth() неправильно возвращает 1
+static std::unordered_set<int> KNOWN_WIDE_EMOJI = {
+    0x1F300, 0x1F301, 0x1F302, 0x1F303, 0x1F304, 0x1F305, 0x1F306, 0x1F307,
+    0x1F308, 0x1F309, 0x1F30A, 0x1F30B, 0x1F30C, 0x1F30D, 0x1F30E, 0x1F30F,
+    0x1F310, 0x1F311, 0x1F312, 0x1F313, 0x1F314, 0x1F315, 0x1F316, 0x1F317,
+    0x1F318, 0x1F319, 0x1F31A, 0x1F31B, 0x1F31C, 0x1F31D, 0x1F31E, 0x1F31F,
+    0x1F320, 0x1F321, 0x1F322, 0x1F323, 0x1F324, 0x1F325, 0x1F326, 0x1F327,
+    0x1F328, 0x1F329, 0x1F32A, 0x1F32B, 0x1F32C,
+    0x1F4A0, 0x1F4A1, 0x1F4A2, 0x1F4A3, 0x1F4A4, 0x1F4A5, 0x1F4A6, 0x1F4A7,
+    0x1F4A8, 0x1F4A9, 0x1F4AA, 0x1F4AB, 0x1F4AC, 0x1F4AD, 0x1F4AE, 0x1F4AF,
+    0x1F525, 0x1F31F, 0x1F389, 0x1F38A, 0x1F3C6,
+    0x1F3CB, 0x1F3CC, 0x1F3CD, 0x1F3CE, 0x1F3CF, 0x1F3D0, 0x1F3D1, 0x1F3D2,
+    0x1F3D3, 0x1F3D4, 0x1F3D5, 0x1F3D6, 0x1F3D7, 0x1F3D8, 0x1F3D9, 0x1F3DA,
+    0x1F3DB, 0x1F3DC, 0x1F3DD, 0x1F3DE, 0x1F3DF, 0x1F3E0, 0x1F3E1, 0x1F3E2,
+    0x1F3E3, 0x1F3E4, 0x1F3E5, 0x1F3E6, 0x1F3E7, 0x1F3E8, 0x1F3E9, 0x1F3EA,
+    0x1F3EB, 0x1F3EC, 0x1F3ED, 0x1F3EE, 0x1F3EF, 0x1F3F0,
+    0x1F400, 0x1F401, 0x1F402, 0x1F403, 0x1F404, 0x1F405, 0x1F406, 0x1F407,
+    0x1F408, 0x1F409, 0x1F40A, 0x1F40B, 0x1F40C, 0x1F40D, 0x1F40E, 0x1F40F,
+    0x1F410, 0x1F411, 0x1F412, 0x1F413, 0x1F414, 0x1F415, 0x1F416, 0x1F417,
+    0x1F418, 0x1F419, 0x1F41A, 0x1F41B, 0x1F41C, 0x1F41D, 0x1F41E, 0x1F41F,
+    0x1F420, 0x1F421, 0x1F422, 0x1F423, 0x1F424, 0x1F425, 0x1F426, 0x1F427,
+    0x1F428, 0x1F429, 0x1F42A, 0x1F42B, 0x1F42C, 0x1F42D, 0x1F42E, 0x1F42F,
+    0x1F430, 0x1F431, 0x1F432, 0x1F433, 0x1F434, 0x1F435, 0x1F436, 0x1F437,
+    0x1F438, 0x1F439, 0x1F43A, 0x1F43B, 0x1F43C, 0x1F43D, 0x1F43E, 0x1F43F,
+    0x1F440, 0x1F441, 0x1F442, 0x1F443, 0x1F444, 0x1F445, 0x1F446, 0x1F447,
+    0x1F448, 0x1F449, 0x1F44A, 0x1F44B, 0x1F44C, 0x1F44D, 0x1F44E, 0x1F44F,
+    0x1F450, 0x1F451, 0x1F452, 0x1F453, 0x1F454, 0x1F455, 0x1F456, 0x1F457,
+    0x1F458, 0x1F459, 0x1F45A, 0x1F45B, 0x1F45C, 0x1F45D, 0x1F45E, 0x1F45F,
+    0x1F460, 0x1F461, 0x1F462, 0x1F463, 0x1F464, 0x1F465, 0x1F466, 0x1F467,
+    0x1F468, 0x1F469, 0x1F46A, 0x1F46B, 0x1F46C, 0x1F46D, 0x1F46E, 0x1F46F,
+    0x1F470, 0x1F471, 0x1F472, 0x1F473, 0x1F474, 0x1F475, 0x1F476, 0x1F477,
+    0x1F478, 0x1F479, 0x1F47A, 0x1F47B, 0x1F47C, 0x1F47D, 0x1F47E, 0x1F47F,
+    0x1F480, 0x1F481, 0x1F482, 0x1F483, 0x1F484, 0x1F485, 0x1F486, 0x1F487,
+    0x1F488, 0x1F489, 0x1F48A, 0x1F48B, 0x1F48C, 0x1F48D, 0x1F48E, 0x1F48F,
+    0x1F490, 0x1F491, 0x1F492, 0x1F493, 0x1F494, 0x1F495, 0x1F496, 0x1F497,
+    0x1F498, 0x1F499, 0x1F49A, 0x1F49B, 0x1F49C, 0x1F49D, 0x1F49E, 0x1F49F,
+};
+
+// Проверка: codepoint в emoji диапазоне (где wcwidth часто неправильный)
+static bool is_emoji_codepoint(int cp) {
+    // Emoji ranges где glibc wcwidth() часто возвращает 1 вместо 2
+    if (cp >= 0x1F300 && cp <= 0x1F9FF) return true;  // Supplemental Symbols and Pictographs
+    if (cp >= 0x2600 && cp <= 0x26FF) return true;    // Miscellaneous Symbols (many are weather/emoji)
+    if (cp >= 0x2700 && cp <= 0x27BF) return true;    // Dingbats
+    if (cp >= 0x1F000 && cp <= 0x1F02F) return true;  // Mahjong tiles
+    if (cp >= 0x1F0A0 && cp <= 0x1F0FF) return true;   // Playing cards
+    if (cp >= 0x1F680 && cp <= 0x1F6FF) return true;  // Transport and map symbols
+    if (cp >= 0x1F900 && cp <= 0x1F9FF) return true;  // Supplemental Symbols and Pictographs
+    return false;
+}
+
+static int get_char_width(wchar_t wc) {
+    int w = wcwidth(wc);
+    int cp = (int)wc;
+    // Fix glibc bug: emoji возвращают width=1 вместо 2
+    if (w == 1 && is_emoji_codepoint(cp)) return 2;
+    // Variation selector добавляет +1 к ширине базового символа
+    return w;
+}
+
 
 // ─────────────────────────── Цвета ───────────────────────────
 #define C_RESET   "\033[0m"
@@ -54,7 +115,7 @@ static std::string get_home_dir() {
 #define DEFAULT_MAX_TOKENS  4096
 
 // ─────────────────────────── Версия ───────────────────────────
-#define APP_VERSION "1.0.1"
+#define APP_VERSION "1.0.2"
 
 
 static std::string HISTORY_FILE;
@@ -221,8 +282,24 @@ static std::vector<std::string> split_table_cells(const std::string &line) {
 }
 
 // Визуальная ширина UTF-8 строки (без ANSI escape)
+// Визуальная ширина UTF-8 строки (без ANSI escape)
+// Фильтрует zero-width и combining символы (U+FE0F, U+200D и т.д.)
+// Визуальная ширина UTF-8 строки (без ANSI escape)
+// Проверка: является ли codepoint emoji (требует VS для отображения как emoji)
+static bool needs_variation_selector(wchar_t cp) {
+    // Символы, которые по умолчанию text, но становятся emoji с FE0F
+    // Misc symbols и дингбаты
+    if ((cp >= 0x2600 && cp <= 0x26FF) ||   // Miscellaneous Symbols
+        (cp >= 0x2700 && cp <= 0x27BF))      // Dingbats
+        return true;
+    return false;
+}
+
 static size_t visible_width(const std::string &s) {
-    size_t w = 0, i = 0;
+    // 1. Убираем ANSI escape-последовательности
+    std::string stripped;
+    stripped.reserve(s.size());
+    size_t i = 0;
     while (i < s.size()) {
         if (s[i] == '\033') {
             ++i;
@@ -233,15 +310,40 @@ static size_t visible_width(const std::string &s) {
             }
             continue;
         }
-        unsigned char c = s[i];
-        if      (c <= 0x7F)          { w++; i += 1; }
-        else if ((c & 0xE0) == 0xC0) { w++; i += 2; }
-        else if ((c & 0xF0) == 0xE0) { w++; i += 3; }
-        else if ((c & 0xF8) == 0xF0) { w += 2; i += 4; }
-        else { i++; }
+        stripped += s[i++];
+    }
+    
+    // 2. Декодируем UTF-8 и используем wcwidth() с учётом variation selectors
+    size_t w = 0;
+    i = 0;
+    while (i < stripped.size()) {
+        wchar_t wc = 0;
+        int clen = mbtowc(&wc, stripped.c_str() + i, MB_CUR_MAX);
+        if (clen <= 0) { i++; continue; }
+        
+        // Проверяем Variation Selector (FE0F или FE0E)
+        bool has_vs = false;
+        if (i + clen < stripped.size()) {
+            wchar_t next_cp = 0;
+            int next_clen = mbtowc(&next_cp, stripped.c_str() + i + clen, MB_CUR_MAX);
+            if (next_clen > 0 && (next_cp == 0xFE0F || next_cp == 0xFE0E)) {
+                has_vs = true;
+                int char_w = wcwidth(wc);
+                // VS16 превращает text glyph в emoji, обычно добавляя 1 к ширине
+                w += (char_w > 0) ? char_w + 1 : 1;
+                i += clen + next_clen;
+            }
+        }
+        
+        if (!has_vs) {
+            int char_w = wcwidth(wc);
+            if (char_w > 0) w += char_w;
+            i += clen;
+        }
     }
     return w;
 }
+
 
 static std::vector<size_t> g_table_col_widths;
 
@@ -1517,6 +1619,8 @@ static std::string command_arg(const std::string &s, const std::string &cmd) {
 
 // ─────────────────────────── main ────────────────────────────
 int main(int argc, char *argv[]) {
+
+std::setlocale(LC_ALL, "");
     // Инициализируем пути
     std::string home = get_home_dir();
     HISTORY_FILE       = home + "/tmp/chat_history.json";
