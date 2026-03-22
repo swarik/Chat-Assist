@@ -115,7 +115,7 @@ static std::string get_home_dir() {
 #define DEFAULT_MAX_TOKENS  4096
 
 // ─────────────────────────── Версия ───────────────────────────
-#define APP_VERSION "1.0.2"
+#define APP_VERSION "1.0.3"
 
 
 static std::string HISTORY_FILE;
@@ -795,7 +795,7 @@ std::string do_api_request(bool &aborted) {
 
     // Запускаем спиннер
     g_spinner_stop.store(false);
-    g_spinner_active.store(true);
+    g_spinner_active.store(isatty(fileno(stdout)));
     std::thread spinner_t(spinner_thread_func, G.model);
 
     curl_easy_setopt(curl, CURLOPT_URL, "https://openrouter.ai/api/v1/chat/completions");
@@ -1662,7 +1662,11 @@ std::setlocale(LC_ALL, "");
 
     // ── Режим пайпа / аргументов ──
     bool pipe_mode = !isatty(fileno(stdin));
-    bool has_args  = argc > 1;
+    int real_args = 0;
+    for (int i = 1; i < argc; i++) {
+        if (std::string(argv[i]) != "--restore-session") real_args++;
+    }
+    bool has_args  = real_args > 0;
 
     if (pipe_mode || has_args) {
         std::string message;
