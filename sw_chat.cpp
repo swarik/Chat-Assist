@@ -115,7 +115,7 @@ static std::string get_home_dir() {
 #define DEFAULT_MAX_TOKENS  4096
 
 // ─────────────────────────── Версия ───────────────────────────
-#define APP_VERSION "1.0.3"
+#define APP_VERSION "1.0.4"
 
 
 static std::string HISTORY_FILE;
@@ -130,13 +130,13 @@ struct ChatSession {
     //std::string       model          = "nvidia/nemotron-3-super-120b-a12b:free";
     //std::string       model          = "minimax/minimax-m2.7";
     //std::string       model          = "anthropic/claude-sonnet-4";
-    //std::string       model          = "openai/gpt-5.2";
+    //std::string       model          = "openai/gpt-5.4";
     //std::string       model          = "google/gemini-3.1-pro-preview";
-    //std::string       model          = "x-ai/grok-4";
-    //std::string       model          = "qwen/qwen3-max-thinking";
+    //std::string       model          = "x-ai/grok-4.20-beta";
+    //std::string       model          = "qwen/qwen3.5-397b-a17b";
     //std::string       model          = "xiaomi/mimo-v2-flash";
     //std::string       model          = "xiaomi/mimo-v2-pro"
-    //std::string       model          = "nex-agi/deepseek-v3.1-nex-n1";
+    //std::string       model          = "nex-agi/deepseek-v3.2";
     //std::string       model          = "anthropic/claude-opus-4.6";
     std::string       model          = "anthropic/claude-sonnet-4.6";
 
@@ -1463,25 +1463,25 @@ struct ModelPricing {
 static const ModelPricing KNOWN_PRICING[] = {
     {"anthropic/claude-opus",      5.0,   25.0},
     {"anthropic/claude-sonnet",    3.0,   15.0},
-    {"anthropic/claude-haiku",     0.25,  1.25},
-    {"openai/gpt-5",               10.0,  30.0},
-    {"openai/gpt-4.1",             2.0,   8.0},
-    {"openai/gpt-4.1-mini",        0.4,   1.6},
-    {"openai/gpt-4.1-nano",        0.1,   0.4},
-    {"openai/o3",                  10.0,  40.0},
-    {"openai/o4-mini",             1.1,   4.4},
+    {"anthropic/claude-haiku",     1.0,    5.0},
+    {"openai/gpt-5",               2.5,   15.0},
+    {"openai/gpt-4.1",             2.0,    8.0},
+    {"openai/gpt-4.1-mini",        0.4,    1.6},
+    {"openai/gpt-4.1-nano",        0.1,    0.4},
+    {"openai/o3",                  2.0,    8.0},
+    {"openai/o4-mini",             1.1,    4.4},
     {"google/gemini-2.5-pro",      1.25,  10.0},
-    {"google/gemini-2.5-flash",    0.15,   0.6},
-    {"google/gemini-3",            1.25,  10.0},
-    {"x-ai/grok-4",                10.0,  30.0},
+    {"google/gemini-2.5-flash",    0.3,    2.5},
+    {"google/gemini-3",            2.0,   12.0},
+    {"x-ai/grok-4",                3.0,   15.0},
     {"x-ai/grok-3",                3.0,   15.0},
-    {"x-ai/grok-3-mini",           0.3,   0.5},
-    {"deepseek/deepseek-r1",       0.55,  2.19},
-    {"deepseek/deepseek-chat",     0.27,  1.10},
-    {"qwen/qwen3",                 0.16,  0.64},
-    {"meta-llama/llama-4",         0.2,   0.6},
-    {"minimax/minimax-m2.7",       0.3,   1.2},
-    {"xiaomi/mimo-v2-pro",         1.0,   3.0},
+    {"x-ai/grok-3-mini",           0.3,    0.5},
+    {"deepseek/deepseek-r1",       0.7,    2.5},
+    {"deepseek/deepseek-chat",     0.26,  0.38},
+    {"qwen/qwen3",                 0.39,  2.34},
+    {"meta-llama/llama-4",         0.15,   0.6},
+    {"minimax/minimax-m2.7",       0.3,    1.2},
+    {"xiaomi/mimo-v2-pro",         1.0,    3.0},
     {nullptr, 0, 0}
 };
 
@@ -1637,7 +1637,7 @@ std::setlocale(LC_ALL, "");
             "То, что ты выведешь после ```bash будет сразу исполняться в системе через функцию system();. "
             "Используй максимально аккуратно, чтобы не навредить системе !!! "
             "Всегда придерживайся правила: несколько bash-блоков могут быть в твоём ответе, все будут выполнены последовательно. "
-            "При выводе тобой bash-блока ничего больше не выводить, пока я не разрешу или не разрешу."
+            "При выводе тобой bash-блока ничего больше не выводить, пока я разрешу или не разрешу."
             "Все инструкции, что указаны здесь выше ты должен постоянно помнить и не нарушать. "
             "ЭТО ВАЖНО! Результат выполнения команды будет добавлен к твоему сообщению автоматически. "
             "В папке ~/tmp возможно будет файл memo.md это твоя память. "
@@ -1709,8 +1709,8 @@ std::setlocale(LC_ALL, "");
     std::cout << C_YELLOW << "Модель: " << G.model << C_RESET << std::endl;
     std::cout << C_YELLOW << "Введите /help для справки" << C_RESET << std::endl;
     std::cout << C_GRAY   << "Autorun: " << (G.autorun ? "вкл" : "выкл")
-              << " (переключить: /autorun)" << C_RESET << std::endl;
-    std::cout << C_GRAY   << "История: " << (G.history_enabled ? "вкл" : "выкл")
+              << " (переключить: /autorun)" << C_RESET;
+    std::cout << C_GRAY   << " История: " << (G.history_enabled ? "вкл" : "выкл")
               << " (переключить: /history on|off)" << C_RESET << std::endl;
     std::cout << C_GRAY   << "Подсказка: пустой Enter — отправить, '//' — отправить, "
                              "Ctrl+C во время ответа — прервать"
