@@ -134,11 +134,12 @@ struct ChatSession {
     //std::string       model          = "google/gemini-3.1-pro-preview";
     //std::string       model          = "x-ai/grok-4.20-beta";
     //std::string       model          = "qwen/qwen3.5-397b-a17b";
+    std::string       model          = "qwen/qwen3.6-plus:free";
     //std::string       model          = "xiaomi/mimo-v2-flash";
     //std::string       model          = "xiaomi/mimo-v2-pro"
     //std::string       model          = "nex-agi/deepseek-v3.2";
     //std::string       model          = "anthropic/claude-opus-4.6";
-    std::string       model          = "anthropic/claude-sonnet-4.6";
+    //std::string       model          = "anthropic/claude-sonnet-4.6";
 
 
     std::string       sys_prompt;
@@ -1272,6 +1273,7 @@ static const std::vector<std::string> AVAILABLE_MODELS = {
     "nex-agi/deepseek-v3.1-nex-n1",
     "anthropic/claude-sonnet-4.6",
     "xiaomi/mimo-v2-pro",
+    "qwen/qwen3.6-plus:free",
 };
 
 void cmd_model_select() {
@@ -1482,6 +1484,7 @@ static const ModelPricing KNOWN_PRICING[] = {
     {"meta-llama/llama-4",         0.15,   0.6},
     {"minimax/minimax-m2.7",       0.3,    1.2},
     {"xiaomi/mimo-v2-pro",         1.0,    3.0},
+    {"qwen/qwen3.6-plus:free",     0.0,    0.0},
     {nullptr, 0, 0}
 };
 
