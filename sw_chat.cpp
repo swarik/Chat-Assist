@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 #include <signal.h>
+#include <sys/wait.h>
 #include <sstream>
 #include <atomic>
 #include <thread>
@@ -159,11 +160,18 @@ static ChatSession G;
 static volatile sig_atomic_t g_exit_requested = 0;
 static volatile sig_atomic_t g_stream_abort   = 0;
 static volatile sig_atomic_t g_in_streaming   = 0; // 1 пока идёт стриминг
+static volatile sig_atomic_t g_bash_abort      = 0; // 1 = прервать bash-команду
+static volatile sig_atomic_t g_bash_running    = 0; // 1 пока выполняется bash
+static pid_t                   g_bash_pid       = 0; // PID bash-процесса
 static std::mutex g_stream_mutex;  // Мьютекс для защиты потоков
 
 static void signal_handler(int /*sig*/) {
     // Только sig_atomic_t операции — mutex нельзя использовать в обработчике сигнала (не async-signal-safe)
-    if (g_in_streaming) {
+    if (g_bash_running) {
+        g_bash_abort = 1;
+        // Отправляем SIGINT дочернему процессу
+        if (g_bash_pid > 0) kill(g_bash_pid, SIGINT);
+    } else if (g_in_streaming) {
         g_stream_abort = 1;
     } else {
         g_exit_requested = 1;
@@ -297,12 +305,12 @@ static bool needs_variation_selector(wchar_t cp) {
 }
 
 static size_t visible_width(const std::string &s) {
-    // 1. Убираем ANSI escape-последовательности
+    // 1. Strip ANSI escape sequences
     std::string stripped;
     stripped.reserve(s.size());
     size_t i = 0;
     while (i < s.size()) {
-        if (s[i] == '\033') {
+        if (s[i] == '') {
             ++i;
             if (i < s.size() && s[i] == '[') {
                 ++i;
@@ -313,38 +321,62 @@ static size_t visible_width(const std::string &s) {
         }
         stripped += s[i++];
     }
-    
-    // 2. Декодируем UTF-8 и используем wcwidth() с учётом variation selectors
+
+    // 2. Decode UTF-8 and calculate visual width
     size_t w = 0;
     i = 0;
+    mbtowc(nullptr, nullptr, 0);
     while (i < stripped.size()) {
         wchar_t wc = 0;
         int clen = mbtowc(&wc, stripped.c_str() + i, MB_CUR_MAX);
-        if (clen <= 0) { i++; continue; }
-        
-        // Проверяем Variation Selector (FE0F или FE0E)
-        bool has_vs = false;
-        if (i + clen < stripped.size()) {
-            wchar_t next_cp = 0;
-            int next_clen = mbtowc(&next_cp, stripped.c_str() + i + clen, MB_CUR_MAX);
-            if (next_clen > 0 && (next_cp == 0xFE0F || next_cp == 0xFE0E)) {
-                has_vs = true;
-                int char_w = wcwidth(wc);
-                // VS16 превращает text glyph в emoji, обычно добавляя 1 к ширине
-                w += (char_w > 0) ? char_w + 1 : 1;
-                i += clen + next_clen;
-            }
-        }
-        
-        if (!has_vs) {
-            int char_w = wcwidth(wc);
-            if (char_w > 0) w += char_w;
+        if (clen <= 0) { ++i; continue; }
+        int cp = (int)wc;
+
+        // Zero-width characters
+        if ((cp >= 0xFE00 && cp <= 0xFE0F) ||
+            (cp >= 0xE0100 && cp <= 0xE01EF) ||
+            cp == 0x200D ||
+            cp == 0x200B ||
+            cp == 0x200C ||
+            cp == 0x2060 ||
+            cp == 0xFEFF) {
             i += clen;
+            continue;
         }
+
+        // Regional Indicator pairs (flags)
+        if (cp >= 0x1F1E6 && cp <= 0x1F1FF) {
+            int flag_count = 0;
+            size_t j = i;
+            while (j < stripped.size()) {
+                wchar_t fw = 0;
+                int fl = mbtowc(&fw, stripped.c_str() + j, MB_CUR_MAX);
+                if (fl <= 0) break;
+                int fcp = (int)fw;
+                if (fcp >= 0x1F1E6 && fcp <= 0x1F1FF) {
+                    flag_count++;
+                    j += fl;
+                } else break;
+            }
+            w += (flag_count / 2) * 2;
+            i = j;
+            continue;
+        }
+
+        // All emoji codepoints — double-width
+        if (is_emoji_codepoint(cp)) {
+            w += 2;
+            i += clen;
+            continue;
+        }
+
+        // Regular characters
+        int char_w = wcwidth(wc);
+        if (char_w > 0) w += char_w;
+        i += clen;
     }
     return w;
 }
-
 
 static std::vector<size_t> g_table_col_widths;
 
@@ -638,24 +670,100 @@ static std::string shell_escape(const std::string& s) {
 }
 
 std::string exec_with_timeout(const std::string& cmd, int timeout_sec) {
-    std::string safe_cmd = "timeout " + std::to_string(timeout_sec) +
-                           " bash -c " + shell_escape(cmd) + " 2>&1";
-    std::string result;
-    char buffer[256];
-    FILE* pipe = popen(safe_cmd.c_str(), "r");
-    if (!pipe) return "[popen failed]";
-    while (fgets(buffer, sizeof(buffer), pipe) != nullptr)
-        result += buffer;
-    int ret = pclose(pipe);
-    if (WIFEXITED(ret) && WEXITSTATUS(ret) == 124)
-        result += "\n[ТАЙМАУТ: команда прервана после " + std::to_string(timeout_sec) + " сек]";
-    if (result.size() > (size_t)MAX_CMD_OUTPUT) {
-        size_t cut = MAX_CMD_OUTPUT;
-        while (cut > 0 && (result[cut] & 0xC0) == 0x80) --cut;
-        result = result.substr(0, cut) +
-                 "\n[...вывод обрезан, превышен лимит " +
-                 std::to_string(MAX_CMD_OUTPUT) + " байт...]";
+    int pipefd[2];
+    if (pipe(pipefd) == -1) return "[pipe failed]";
+
+    g_bash_abort = 0;
+    g_bash_pid = fork();
+
+    if (g_bash_pid < 0) {
+        close(pipefd[0]); close(pipefd[1]);
+        return "[fork failed]";
     }
+
+    if (g_bash_pid == 0) {
+        // Дочерний процесс
+        close(pipefd[0]);
+        dup2(pipefd[1], STDOUT_FILENO);
+        dup2(pipefd[1], STDERR_FILENO);
+        close(pipefd[1]);
+        execl("/bin/bash", "bash", "-c", cmd.c_str(), (char*)NULL);
+        _exit(127);
+    }
+
+    // Родительский процесс
+    close(pipefd[1]);
+    g_bash_running = 1;
+
+    std::string result;
+    char buffer[4096];
+
+    // Неблокирующее чтение для возможности проверки g_bash_abort
+    auto start_time = std::chrono::steady_clock::now();
+
+    while (true) {
+        if (g_bash_abort) {
+            kill(g_bash_pid, SIGINT);
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            kill(g_bash_pid, SIGKILL);
+            result += "\n[ПРЕРВАНО: Ctrl+C]";
+            break;
+        }
+
+        // Проверяем таймаут
+        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::steady_clock::now() - start_time).count();
+        if (elapsed >= timeout_sec) {
+            kill(g_bash_pid, SIGTERM);
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            kill(g_bash_pid, SIGKILL);
+            result += "\n[ТАЙМАУТ: команда прервана после " + std::to_string(timeout_sec) + " сек]";
+            break;
+        }
+
+        // Неблокирующее чтение через select
+        fd_set fds;
+        FD_ZERO(&fds);
+        FD_SET(pipefd[0], &fds);
+        struct timeval tv;
+        tv.tv_sec = 0;
+        tv.tv_usec = 200000; // 200ms
+
+        int sel = select(pipefd[0] + 1, &fds, nullptr, nullptr, &tv);
+        if (sel > 0 && FD_ISSET(pipefd[0], &fds)) {
+            ssize_t n = read(pipefd[0], buffer, sizeof(buffer));
+            if (n > 0) {
+                result.append(buffer, n);
+                if (result.size() > (size_t)MAX_CMD_OUTPUT) {
+                    size_t cut = MAX_CMD_OUTPUT;
+                    while (cut > 0 && (result[cut] & 0xC0) == 0x80) --cut;
+                    result = result.substr(0, cut) +
+                             "\n[...вывод обрезан, превышен лимит " +
+                             std::to_string(MAX_CMD_OUTPUT) + " байт...]";
+                    kill(g_bash_pid, SIGKILL);
+                    break;
+                }
+            } else if (n == 0) {
+                // EOF — процесс завершился
+                break;
+            }
+        }
+        // sel == 0 — таймаут select, продолжаем цикл
+    }
+
+    close(pipefd[0]);
+
+    // Забираем код возврата
+    int status = 0;
+    if (!g_bash_abort) {
+        waitpid(g_bash_pid, &status, 0);
+    } else {
+        waitpid(g_bash_pid, &status, WNOHANG);
+    }
+
+    g_bash_running = 0;
+    g_bash_pid = 0;
+
     return result;
 }
 
