@@ -20,7 +20,7 @@
 
 using json = nlohmann::json;
 // ─────────────────────────── Версия ───────────────────────────
-#define APP_VERSION "1.0.7"
+#define APP_VERSION "1.0.8"
 
 
 // Emoji codepoints где glibc wcwidth() неправильно возвращает 1
