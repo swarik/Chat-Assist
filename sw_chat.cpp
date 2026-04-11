@@ -817,7 +817,7 @@ static std::string get_home_dir() {
 #define DEFAULT_MAX_TOKENS  4096
 
 // ─────────────────────────── Версия ───────────────────────────
-#define APP_VERSION "1.0.5"
+#define APP_VERSION "1.0.6"
 
 
 static std::string HISTORY_FILE;
@@ -836,12 +836,12 @@ struct ChatSession {
     //std::string       model          = "google/gemini-3.1-pro-preview";
     //std::string       model          = "x-ai/grok-4.20-beta";
     //std::string       model          = "qwen/qwen3.5-397b-a17b";
-    std::string       model          = "qwen/qwen3.6-plus:free";
+    //std::string       model          = "qwen/qwen3.6-plus:free";
     //std::string       model          = "xiaomi/mimo-v2-flash";
     //std::string       model          = "xiaomi/mimo-v2-pro"
     //std::string       model          = "nex-agi/deepseek-v3.2";
     //std::string       model          = "anthropic/claude-opus-4.6";
-    //std::string       model          = "anthropic/claude-sonnet-4.6";
+    std::string       model          = "anthropic/claude-sonnet-4.6";
 
 
     std::string       sys_prompt;
@@ -1869,6 +1869,17 @@ void cmd_update() {
     }
 
     std::cout << C_YELLOW << "[update] Доступна новая версия: " << remote_ver << C_RESET << std::endl;
+
+    // Запрашиваем согласие пользователя
+    {
+        char *rl_ans = readline(C_YELLOW "[update] Установить обновление? (y/n): " C_RESET);
+        std::string ans;
+        if (rl_ans) { ans = std::string(rl_ans); free(rl_ans); }
+        if (ans != "y" && ans != "Y" && ans != "д" && ans != "Д") {
+            std::cout << C_GRAY << "[update] Обновление отменено пользователем]" << C_RESET << std::endl;
+            return;
+        }
+    }
 
     // 3. Сохранить новый исходник
     {
