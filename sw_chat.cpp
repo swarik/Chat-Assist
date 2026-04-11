@@ -8,7 +8,6 @@
 #include <string>
 #include <vector>
 #include <signal.h>
-#include <sys/wait.h>
 #include <sstream>
 #include <atomic>
 #include <thread>
@@ -58,26 +57,690 @@ static std::unordered_set<int> KNOWN_WIDE_EMOJI = {
     0x1F498, 0x1F499, 0x1F49A, 0x1F49B, 0x1F49C, 0x1F49D, 0x1F49E, 0x1F49F,
 };
 
-// Проверка: codepoint в emoji диапазоне (где wcwidth часто неправильный)
+// Emoji_Presentation: всегда отображается как emoji (ширина 2)
+static bool is_emoji_presentation(int cp) {
+    if (cp >= 0x231A && cp <= 0x231B) return true;
+    if (cp >= 0x23E9 && cp <= 0x23EC) return true;
+    if (cp == 0x23F0) return true;
+    if (cp == 0x23F3) return true;
+    if (cp >= 0x25FD && cp <= 0x25FE) return true;
+    if (cp >= 0x2614 && cp <= 0x2615) return true;
+    if (cp >= 0x2648 && cp <= 0x2653) return true;
+    if (cp == 0x267F) return true;
+    if (cp == 0x2693) return true;
+    if (cp == 0x26A1) return true;
+    if (cp >= 0x26AA && cp <= 0x26AB) return true;
+    if (cp >= 0x26BD && cp <= 0x26BE) return true;
+    if (cp >= 0x26C4 && cp <= 0x26C5) return true;
+    if (cp == 0x26CE) return true;
+    if (cp == 0x26D4) return true;
+    if (cp == 0x26EA) return true;
+    if (cp >= 0x26F2 && cp <= 0x26F3) return true;
+    if (cp == 0x26F5) return true;
+    if (cp == 0x26FA) return true;
+    if (cp == 0x26FD) return true;
+    if (cp == 0x2705) return true;
+    if (cp >= 0x270A && cp <= 0x270B) return true;
+    if (cp == 0x2728) return true;
+    if (cp == 0x274C) return true;
+    if (cp == 0x274E) return true;
+    if (cp >= 0x2753 && cp <= 0x2755) return true;
+    if (cp == 0x2757) return true;
+    if (cp >= 0x2795 && cp <= 0x2797) return true;
+    if (cp == 0x27B0) return true;
+    if (cp == 0x27BF) return true;
+    if (cp >= 0x2B1B && cp <= 0x2B1C) return true;
+    if (cp == 0x2B50) return true;
+    if (cp == 0x2B55) return true;
+    if (cp == 0x1F004) return true;
+    if (cp == 0x1F0CF) return true;
+    if (cp == 0x1F18E) return true;
+    if (cp >= 0x1F191 && cp <= 0x1F19A) return true;
+    // Regional Indicator обрабатываются отдельно (пары = флаги стран)
+    // if (cp >= 0x1F1E6 && cp <= 0x1F1FF) return true;
+    if (cp == 0x1F201) return true;
+    if (cp == 0x1F21A) return true;
+    if (cp == 0x1F22F) return true;
+    if (cp >= 0x1F232 && cp <= 0x1F236) return true;
+    if (cp >= 0x1F238 && cp <= 0x1F23A) return true;
+    if (cp >= 0x1F250 && cp <= 0x1F251) return true;
+    if (cp >= 0x1F300 && cp <= 0x1F30C) return true;
+    if (cp >= 0x1F30D && cp <= 0x1F30E) return true;
+    if (cp == 0x1F30F) return true;
+    if (cp == 0x1F310) return true;
+    if (cp == 0x1F311) return true;
+    if (cp == 0x1F312) return true;
+    if (cp >= 0x1F313 && cp <= 0x1F315) return true;
+    if (cp >= 0x1F316 && cp <= 0x1F318) return true;
+    if (cp == 0x1F319) return true;
+    if (cp == 0x1F31A) return true;
+    if (cp == 0x1F31B) return true;
+    if (cp == 0x1F31C) return true;
+    if (cp >= 0x1F31D && cp <= 0x1F31E) return true;
+    if (cp >= 0x1F31F && cp <= 0x1F320) return true;
+    if (cp >= 0x1F32D && cp <= 0x1F32F) return true;
+    if (cp >= 0x1F330 && cp <= 0x1F331) return true;
+    if (cp >= 0x1F332 && cp <= 0x1F333) return true;
+    if (cp >= 0x1F334 && cp <= 0x1F335) return true;
+    if (cp >= 0x1F337 && cp <= 0x1F34A) return true;
+    if (cp == 0x1F34B) return true;
+    if (cp >= 0x1F34C && cp <= 0x1F34F) return true;
+    if (cp == 0x1F350) return true;
+    if (cp >= 0x1F351 && cp <= 0x1F37B) return true;
+    if (cp == 0x1F37C) return true;
+    if (cp >= 0x1F37E && cp <= 0x1F37F) return true;
+    if (cp >= 0x1F380 && cp <= 0x1F393) return true;
+    if (cp >= 0x1F3A0 && cp <= 0x1F3C4) return true;
+    if (cp == 0x1F3C5) return true;
+    if (cp == 0x1F3C6) return true;
+    if (cp == 0x1F3C7) return true;
+    if (cp == 0x1F3C8) return true;
+    if (cp == 0x1F3C9) return true;
+    if (cp == 0x1F3CA) return true;
+    if (cp >= 0x1F3CF && cp <= 0x1F3D3) return true;
+    if (cp >= 0x1F3E0 && cp <= 0x1F3E3) return true;
+    if (cp == 0x1F3E4) return true;
+    if (cp >= 0x1F3E5 && cp <= 0x1F3F0) return true;
+    if (cp == 0x1F3F4) return true;
+    if (cp >= 0x1F3F8 && cp <= 0x1F407) return true;
+    if (cp == 0x1F408) return true;
+    if (cp >= 0x1F409 && cp <= 0x1F40B) return true;
+    if (cp >= 0x1F40C && cp <= 0x1F40E) return true;
+    if (cp >= 0x1F40F && cp <= 0x1F410) return true;
+    if (cp >= 0x1F411 && cp <= 0x1F412) return true;
+    if (cp == 0x1F413) return true;
+    if (cp == 0x1F414) return true;
+    if (cp == 0x1F415) return true;
+    if (cp == 0x1F416) return true;
+    if (cp >= 0x1F417 && cp <= 0x1F429) return true;
+    if (cp == 0x1F42A) return true;
+    if (cp >= 0x1F42B && cp <= 0x1F43E) return true;
+    if (cp == 0x1F440) return true;
+    if (cp >= 0x1F442 && cp <= 0x1F464) return true;
+    if (cp == 0x1F465) return true;
+    if (cp >= 0x1F466 && cp <= 0x1F46B) return true;
+    if (cp >= 0x1F46C && cp <= 0x1F46D) return true;
+    if (cp >= 0x1F46E && cp <= 0x1F4AC) return true;
+    if (cp == 0x1F4AD) return true;
+    if (cp >= 0x1F4AE && cp <= 0x1F4B5) return true;
+    if (cp >= 0x1F4B6 && cp <= 0x1F4B7) return true;
+    if (cp >= 0x1F4B8 && cp <= 0x1F4EB) return true;
+    if (cp >= 0x1F4EC && cp <= 0x1F4ED) return true;
+    if (cp == 0x1F4EE) return true;
+    if (cp == 0x1F4EF) return true;
+    if (cp >= 0x1F4F0 && cp <= 0x1F4F4) return true;
+    if (cp == 0x1F4F5) return true;
+    if (cp >= 0x1F4F6 && cp <= 0x1F4F7) return true;
+    if (cp == 0x1F4F8) return true;
+    if (cp >= 0x1F4F9 && cp <= 0x1F4FC) return true;
+    if (cp >= 0x1F4FF && cp <= 0x1F502) return true;
+    if (cp == 0x1F503) return true;
+    if (cp >= 0x1F504 && cp <= 0x1F507) return true;
+    if (cp == 0x1F508) return true;
+    if (cp == 0x1F509) return true;
+    if (cp >= 0x1F50A && cp <= 0x1F514) return true;
+    if (cp == 0x1F515) return true;
+    if (cp >= 0x1F516 && cp <= 0x1F52B) return true;
+    if (cp >= 0x1F52C && cp <= 0x1F52D) return true;
+    if (cp >= 0x1F52E && cp <= 0x1F53D) return true;
+    if (cp >= 0x1F54B && cp <= 0x1F54E) return true;
+    if (cp >= 0x1F550 && cp <= 0x1F55B) return true;
+    if (cp >= 0x1F55C && cp <= 0x1F567) return true;
+    if (cp == 0x1F57A) return true;
+    if (cp >= 0x1F595 && cp <= 0x1F596) return true;
+    if (cp == 0x1F5A4) return true;
+    if (cp >= 0x1F5FB && cp <= 0x1F5FF) return true;
+    if (cp == 0x1F600) return true;
+    if (cp >= 0x1F601 && cp <= 0x1F606) return true;
+    if (cp >= 0x1F607 && cp <= 0x1F608) return true;
+    if (cp >= 0x1F609 && cp <= 0x1F60D) return true;
+    if (cp == 0x1F60E) return true;
+    if (cp == 0x1F60F) return true;
+    if (cp == 0x1F610) return true;
+    if (cp == 0x1F611) return true;
+    if (cp >= 0x1F612 && cp <= 0x1F614) return true;
+    if (cp == 0x1F615) return true;
+    if (cp == 0x1F616) return true;
+    if (cp == 0x1F617) return true;
+    if (cp == 0x1F618) return true;
+    if (cp == 0x1F619) return true;
+    if (cp == 0x1F61A) return true;
+    if (cp == 0x1F61B) return true;
+    if (cp >= 0x1F61C && cp <= 0x1F61E) return true;
+    if (cp == 0x1F61F) return true;
+    if (cp >= 0x1F620 && cp <= 0x1F625) return true;
+    if (cp >= 0x1F626 && cp <= 0x1F627) return true;
+    if (cp >= 0x1F628 && cp <= 0x1F62B) return true;
+    if (cp == 0x1F62C) return true;
+    if (cp == 0x1F62D) return true;
+    if (cp >= 0x1F62E && cp <= 0x1F62F) return true;
+    if (cp >= 0x1F630 && cp <= 0x1F633) return true;
+    if (cp == 0x1F634) return true;
+    if (cp == 0x1F635) return true;
+    if (cp == 0x1F636) return true;
+    if (cp >= 0x1F637 && cp <= 0x1F640) return true;
+    if (cp >= 0x1F641 && cp <= 0x1F644) return true;
+    if (cp >= 0x1F645 && cp <= 0x1F64F) return true;
+    if (cp == 0x1F680) return true;
+    if (cp >= 0x1F681 && cp <= 0x1F682) return true;
+    if (cp >= 0x1F683 && cp <= 0x1F685) return true;
+    if (cp == 0x1F686) return true;
+    if (cp == 0x1F687) return true;
+    if (cp == 0x1F688) return true;
+    if (cp == 0x1F689) return true;
+    if (cp >= 0x1F68A && cp <= 0x1F68B) return true;
+    if (cp == 0x1F68C) return true;
+    if (cp == 0x1F68D) return true;
+    if (cp == 0x1F68E) return true;
+    if (cp == 0x1F68F) return true;
+    if (cp == 0x1F690) return true;
+    if (cp >= 0x1F691 && cp <= 0x1F693) return true;
+    if (cp == 0x1F694) return true;
+    if (cp == 0x1F695) return true;
+    if (cp == 0x1F696) return true;
+    if (cp == 0x1F697) return true;
+    if (cp == 0x1F698) return true;
+    if (cp >= 0x1F699 && cp <= 0x1F69A) return true;
+    if (cp >= 0x1F69B && cp <= 0x1F6A1) return true;
+    if (cp == 0x1F6A2) return true;
+    if (cp == 0x1F6A3) return true;
+    if (cp >= 0x1F6A4 && cp <= 0x1F6A5) return true;
+    if (cp == 0x1F6A6) return true;
+    if (cp >= 0x1F6A7 && cp <= 0x1F6AD) return true;
+    if (cp >= 0x1F6AE && cp <= 0x1F6B1) return true;
+    if (cp == 0x1F6B2) return true;
+    if (cp >= 0x1F6B3 && cp <= 0x1F6B5) return true;
+    if (cp == 0x1F6B6) return true;
+    if (cp >= 0x1F6B7 && cp <= 0x1F6B8) return true;
+    if (cp >= 0x1F6B9 && cp <= 0x1F6BE) return true;
+    if (cp == 0x1F6BF) return true;
+    if (cp == 0x1F6C0) return true;
+    if (cp >= 0x1F6C1 && cp <= 0x1F6C5) return true;
+    if (cp == 0x1F6CC) return true;
+    if (cp == 0x1F6D0) return true;
+    if (cp >= 0x1F6D1 && cp <= 0x1F6D2) return true;
+    if (cp == 0x1F6D5) return true;
+    if (cp >= 0x1F6D6 && cp <= 0x1F6D7) return true;
+    if (cp >= 0x1F6DD && cp <= 0x1F6DF) return true;
+    if (cp >= 0x1F6EB && cp <= 0x1F6EC) return true;
+    if (cp >= 0x1F6F4 && cp <= 0x1F6F6) return true;
+    if (cp >= 0x1F6F7 && cp <= 0x1F6F8) return true;
+    if (cp == 0x1F6F9) return true;
+    if (cp == 0x1F6FA) return true;
+    if (cp >= 0x1F6FB && cp <= 0x1F6FC) return true;
+    if (cp >= 0x1F7E0 && cp <= 0x1F7EB) return true;
+    if (cp == 0x1F7F0) return true;
+    if (cp == 0x1F90C) return true;
+    if (cp >= 0x1F90D && cp <= 0x1F90F) return true;
+    if (cp >= 0x1F910 && cp <= 0x1F918) return true;
+    if (cp >= 0x1F919 && cp <= 0x1F91E) return true;
+    if (cp == 0x1F91F) return true;
+    if (cp >= 0x1F920 && cp <= 0x1F927) return true;
+    if (cp >= 0x1F928 && cp <= 0x1F92F) return true;
+    if (cp == 0x1F930) return true;
+    if (cp >= 0x1F931 && cp <= 0x1F932) return true;
+    if (cp >= 0x1F933 && cp <= 0x1F93A) return true;
+    if (cp >= 0x1F93C && cp <= 0x1F93E) return true;
+    if (cp == 0x1F93F) return true;
+    if (cp >= 0x1F940 && cp <= 0x1F945) return true;
+    if (cp >= 0x1F947 && cp <= 0x1F94B) return true;
+    if (cp == 0x1F94C) return true;
+    if (cp >= 0x1F94D && cp <= 0x1F94F) return true;
+    if (cp >= 0x1F950 && cp <= 0x1F95E) return true;
+    if (cp >= 0x1F95F && cp <= 0x1F96B) return true;
+    if (cp >= 0x1F96C && cp <= 0x1F970) return true;
+    if (cp == 0x1F971) return true;
+    if (cp == 0x1F972) return true;
+    if (cp >= 0x1F973 && cp <= 0x1F976) return true;
+    if (cp >= 0x1F977 && cp <= 0x1F978) return true;
+    if (cp == 0x1F979) return true;
+    if (cp == 0x1F97A) return true;
+    if (cp == 0x1F97B) return true;
+    if (cp >= 0x1F97C && cp <= 0x1F97F) return true;
+    if (cp >= 0x1F980 && cp <= 0x1F984) return true;
+    if (cp >= 0x1F985 && cp <= 0x1F991) return true;
+    if (cp >= 0x1F992 && cp <= 0x1F997) return true;
+    if (cp >= 0x1F998 && cp <= 0x1F9A2) return true;
+    if (cp >= 0x1F9A3 && cp <= 0x1F9A4) return true;
+    if (cp >= 0x1F9A5 && cp <= 0x1F9AA) return true;
+    if (cp >= 0x1F9AB && cp <= 0x1F9AD) return true;
+    if (cp >= 0x1F9AE && cp <= 0x1F9AF) return true;
+    if (cp >= 0x1F9B0 && cp <= 0x1F9B9) return true;
+    if (cp >= 0x1F9BA && cp <= 0x1F9BF) return true;
+    if (cp == 0x1F9C0) return true;
+    if (cp >= 0x1F9C1 && cp <= 0x1F9C2) return true;
+    if (cp >= 0x1F9C3 && cp <= 0x1F9CA) return true;
+    if (cp == 0x1F9CB) return true;
+    if (cp == 0x1F9CC) return true;
+    if (cp >= 0x1F9CD && cp <= 0x1F9CF) return true;
+    if (cp >= 0x1F9D0 && cp <= 0x1F9E6) return true;
+    if (cp >= 0x1F9E7 && cp <= 0x1F9FF) return true;
+    if (cp >= 0x1FA70 && cp <= 0x1FA73) return true;
+    if (cp == 0x1FA74) return true;
+    if (cp >= 0x1FA78 && cp <= 0x1FA7A) return true;
+    if (cp >= 0x1FA7B && cp <= 0x1FA7C) return true;
+    if (cp >= 0x1FA80 && cp <= 0x1FA82) return true;
+    if (cp >= 0x1FA83 && cp <= 0x1FA86) return true;
+    if (cp >= 0x1FA90 && cp <= 0x1FA95) return true;
+    if (cp >= 0x1FA96 && cp <= 0x1FAA8) return true;
+    if (cp >= 0x1FAA9 && cp <= 0x1FAAC) return true;
+    if (cp >= 0x1FAB0 && cp <= 0x1FAB6) return true;
+    if (cp >= 0x1FAB7 && cp <= 0x1FABA) return true;
+    if (cp >= 0x1FAC0 && cp <= 0x1FAC2) return true;
+    if (cp >= 0x1FAC3 && cp <= 0x1FAC5) return true;
+    if (cp >= 0x1FAD0 && cp <= 0x1FAD6) return true;
+    if (cp >= 0x1FAD7 && cp <= 0x1FAD9) return true;
+    if (cp >= 0x1FAE0 && cp <= 0x1FAE7) return true;
+    if (cp >= 0x1FAF0 && cp <= 0x1FAF6) return true;
+    return false;
+}
+
+// Emoji: становится emoji с VS16 (U+FE0F), без VS16 — ширина по wcwidth
 static bool is_emoji_codepoint(int cp) {
-    // Emoji ranges где glibc wcwidth() часто возвращает 1 вместо 2
-    if (cp >= 0x1F300 && cp <= 0x1F9FF) return true;  // Supplemental Symbols and Pictographs
-    if (cp >= 0x2600 && cp <= 0x26FF) return true;    // Miscellaneous Symbols (many are weather/emoji)
-    if (cp >= 0x2700 && cp <= 0x27BF) return true;    // Dingbats
-    if (cp >= 0x1F000 && cp <= 0x1F02F) return true;  // Mahjong tiles
-    if (cp >= 0x1F0A0 && cp <= 0x1F0FF) return true;   // Playing cards
-    if (cp >= 0x1F680 && cp <= 0x1F6FF) return true;  // Transport and map symbols
-    if (cp >= 0x1F900 && cp <= 0x1F9FF) return true;  // Supplemental Symbols and Pictographs
+    if (cp == 0x0023) return true;
+    if (cp == 0x002A) return true;
+    if (cp >= 0x0030 && cp <= 0x0039) return true;
+    if (cp == 0x00A9) return true;
+    if (cp == 0x00AE) return true;
+    if (cp == 0x203C) return true;
+    if (cp == 0x2049) return true;
+    if (cp == 0x2122) return true;
+    if (cp == 0x2139) return true;
+    if (cp >= 0x2194 && cp <= 0x2199) return true;
+    if (cp >= 0x21A9 && cp <= 0x21AA) return true;
+    if (cp >= 0x231A && cp <= 0x231B) return true;
+    if (cp == 0x2328) return true;
+    if (cp == 0x23CF) return true;
+    if (cp >= 0x23E9 && cp <= 0x23EC) return true;
+    if (cp >= 0x23ED && cp <= 0x23EE) return true;
+    if (cp == 0x23EF) return true;
+    if (cp == 0x23F0) return true;
+    if (cp >= 0x23F1 && cp <= 0x23F2) return true;
+    if (cp == 0x23F3) return true;
+    if (cp >= 0x23F8 && cp <= 0x23FA) return true;
+    if (cp == 0x24C2) return true;
+    if (cp >= 0x25AA && cp <= 0x25AB) return true;
+    if (cp == 0x25B6) return true;
+    if (cp == 0x25C0) return true;
+    if (cp >= 0x25FB && cp <= 0x25FE) return true;
+    if (cp >= 0x2600 && cp <= 0x2601) return true;
+    if (cp >= 0x2602 && cp <= 0x2603) return true;
+    if (cp == 0x2604) return true;
+    if (cp == 0x260E) return true;
+    if (cp == 0x2611) return true;
+    if (cp >= 0x2614 && cp <= 0x2615) return true;
+    if (cp == 0x2618) return true;
+    if (cp == 0x261D) return true;
+    if (cp == 0x2620) return true;
+    if (cp >= 0x2622 && cp <= 0x2623) return true;
+    if (cp == 0x2626) return true;
+    if (cp == 0x262A) return true;
+    if (cp == 0x262E) return true;
+    if (cp == 0x262F) return true;
+    if (cp >= 0x2638 && cp <= 0x2639) return true;
+    if (cp == 0x263A) return true;
+    if (cp == 0x2640) return true;
+    if (cp == 0x2642) return true;
+    if (cp >= 0x2648 && cp <= 0x2653) return true;
+    if (cp == 0x265F) return true;
+    if (cp == 0x2660) return true;
+    if (cp == 0x2663) return true;
+    if (cp >= 0x2665 && cp <= 0x2666) return true;
+    if (cp == 0x2668) return true;
+    if (cp == 0x267B) return true;
+    if (cp == 0x267E) return true;
+    if (cp == 0x267F) return true;
+    if (cp == 0x2692) return true;
+    if (cp == 0x2693) return true;
+    if (cp == 0x2694) return true;
+    if (cp == 0x2695) return true;
+    if (cp >= 0x2696 && cp <= 0x2697) return true;
+    if (cp == 0x2699) return true;
+    if (cp >= 0x269B && cp <= 0x269C) return true;
+    if (cp >= 0x26A0 && cp <= 0x26A1) return true;
+    if (cp == 0x26A7) return true;
+    if (cp >= 0x26AA && cp <= 0x26AB) return true;
+    if (cp >= 0x26B0 && cp <= 0x26B1) return true;
+    if (cp >= 0x26BD && cp <= 0x26BE) return true;
+    if (cp >= 0x26C4 && cp <= 0x26C5) return true;
+    if (cp == 0x26C8) return true;
+    if (cp == 0x26CE) return true;
+    if (cp == 0x26CF) return true;
+    if (cp == 0x26D1) return true;
+    if (cp == 0x26D3) return true;
+    if (cp == 0x26D4) return true;
+    if (cp == 0x26E9) return true;
+    if (cp == 0x26EA) return true;
+    if (cp >= 0x26F0 && cp <= 0x26F1) return true;
+    if (cp >= 0x26F2 && cp <= 0x26F3) return true;
+    if (cp == 0x26F4) return true;
+    if (cp == 0x26F5) return true;
+    if (cp >= 0x26F7 && cp <= 0x26F9) return true;
+    if (cp == 0x26FA) return true;
+    if (cp == 0x26FD) return true;
+    if (cp == 0x2702) return true;
+    if (cp == 0x2705) return true;
+    if (cp >= 0x2708 && cp <= 0x270C) return true;
+    if (cp == 0x270D) return true;
+    if (cp == 0x270F) return true;
+    if (cp == 0x2712) return true;
+    if (cp == 0x2714) return true;
+    if (cp == 0x2716) return true;
+    if (cp == 0x271D) return true;
+    if (cp == 0x2721) return true;
+    if (cp == 0x2728) return true;
+    if (cp >= 0x2733 && cp <= 0x2734) return true;
+    if (cp == 0x2744) return true;
+    if (cp == 0x2747) return true;
+    if (cp == 0x274C) return true;
+    if (cp == 0x274E) return true;
+    if (cp >= 0x2753 && cp <= 0x2755) return true;
+    if (cp == 0x2757) return true;
+    if (cp == 0x2763) return true;
+    if (cp == 0x2764) return true;
+    if (cp >= 0x2795 && cp <= 0x2797) return true;
+    if (cp == 0x27A1) return true;
+    if (cp == 0x27B0) return true;
+    if (cp == 0x27BF) return true;
+    if (cp >= 0x2934 && cp <= 0x2935) return true;
+    if (cp >= 0x2B05 && cp <= 0x2B07) return true;
+    if (cp >= 0x2B1B && cp <= 0x2B1C) return true;
+    if (cp == 0x2B50) return true;
+    if (cp == 0x2B55) return true;
+    if (cp == 0x3030) return true;
+    if (cp == 0x303D) return true;
+    if (cp == 0x3297) return true;
+    if (cp == 0x3299) return true;
+    if (cp == 0x1F004) return true;
+    if (cp == 0x1F0CF) return true;
+    if (cp >= 0x1F170 && cp <= 0x1F171) return true;
+    if (cp >= 0x1F17E && cp <= 0x1F17F) return true;
+    if (cp == 0x1F18E) return true;
+    if (cp >= 0x1F191 && cp <= 0x1F19A) return true;
+    // Regional Indicator обрабатываются отдельно (пары = флаги стран)
+    // if (cp >= 0x1F1E6 && cp <= 0x1F1FF) return true;
+    if (cp >= 0x1F201 && cp <= 0x1F202) return true;
+    if (cp == 0x1F21A) return true;
+    if (cp == 0x1F22F) return true;
+    if (cp >= 0x1F232 && cp <= 0x1F23A) return true;
+    if (cp >= 0x1F250 && cp <= 0x1F251) return true;
+    if (cp >= 0x1F300 && cp <= 0x1F30C) return true;
+    if (cp >= 0x1F30D && cp <= 0x1F30E) return true;
+    if (cp == 0x1F30F) return true;
+    if (cp == 0x1F310) return true;
+    if (cp == 0x1F311) return true;
+    if (cp == 0x1F312) return true;
+    if (cp >= 0x1F313 && cp <= 0x1F315) return true;
+    if (cp >= 0x1F316 && cp <= 0x1F318) return true;
+    if (cp == 0x1F319) return true;
+    if (cp == 0x1F31A) return true;
+    if (cp == 0x1F31B) return true;
+    if (cp == 0x1F31C) return true;
+    if (cp >= 0x1F31D && cp <= 0x1F31E) return true;
+    if (cp >= 0x1F31F && cp <= 0x1F320) return true;
+    if (cp == 0x1F321) return true;
+    if (cp >= 0x1F324 && cp <= 0x1F32C) return true;
+    if (cp >= 0x1F32D && cp <= 0x1F32F) return true;
+    if (cp >= 0x1F330 && cp <= 0x1F331) return true;
+    if (cp >= 0x1F332 && cp <= 0x1F333) return true;
+    if (cp >= 0x1F334 && cp <= 0x1F335) return true;
+    if (cp == 0x1F336) return true;
+    if (cp >= 0x1F337 && cp <= 0x1F34A) return true;
+    if (cp == 0x1F34B) return true;
+    if (cp >= 0x1F34C && cp <= 0x1F34F) return true;
+    if (cp == 0x1F350) return true;
+    if (cp >= 0x1F351 && cp <= 0x1F37B) return true;
+    if (cp == 0x1F37C) return true;
+    if (cp == 0x1F37D) return true;
+    if (cp >= 0x1F37E && cp <= 0x1F37F) return true;
+    if (cp >= 0x1F380 && cp <= 0x1F393) return true;
+    if (cp >= 0x1F396 && cp <= 0x1F397) return true;
+    if (cp >= 0x1F399 && cp <= 0x1F39B) return true;
+    if (cp >= 0x1F39E && cp <= 0x1F39F) return true;
+    if (cp >= 0x1F3A0 && cp <= 0x1F3C4) return true;
+    if (cp == 0x1F3C5) return true;
+    if (cp == 0x1F3C6) return true;
+    if (cp == 0x1F3C7) return true;
+    if (cp == 0x1F3C8) return true;
+    if (cp == 0x1F3C9) return true;
+    if (cp == 0x1F3CA) return true;
+    if (cp >= 0x1F3CB && cp <= 0x1F3CE) return true;
+    if (cp >= 0x1F3CF && cp <= 0x1F3D3) return true;
+    if (cp >= 0x1F3D4 && cp <= 0x1F3DF) return true;
+    if (cp >= 0x1F3E0 && cp <= 0x1F3E3) return true;
+    if (cp == 0x1F3E4) return true;
+    if (cp >= 0x1F3E5 && cp <= 0x1F3F0) return true;
+    if (cp == 0x1F3F3) return true;
+    if (cp == 0x1F3F4) return true;
+    if (cp == 0x1F3F5) return true;
+    if (cp == 0x1F3F7) return true;
+    if (cp >= 0x1F3F8 && cp <= 0x1F407) return true;
+    if (cp == 0x1F408) return true;
+    if (cp >= 0x1F409 && cp <= 0x1F40B) return true;
+    if (cp >= 0x1F40C && cp <= 0x1F40E) return true;
+    if (cp >= 0x1F40F && cp <= 0x1F410) return true;
+    if (cp >= 0x1F411 && cp <= 0x1F412) return true;
+    if (cp == 0x1F413) return true;
+    if (cp == 0x1F414) return true;
+    if (cp == 0x1F415) return true;
+    if (cp == 0x1F416) return true;
+    if (cp >= 0x1F417 && cp <= 0x1F429) return true;
+    if (cp == 0x1F42A) return true;
+    if (cp >= 0x1F42B && cp <= 0x1F43E) return true;
+    if (cp == 0x1F43F) return true;
+    if (cp == 0x1F440) return true;
+    if (cp == 0x1F441) return true;
+    if (cp >= 0x1F442 && cp <= 0x1F464) return true;
+    if (cp == 0x1F465) return true;
+    if (cp >= 0x1F466 && cp <= 0x1F46B) return true;
+    if (cp >= 0x1F46C && cp <= 0x1F46D) return true;
+    if (cp >= 0x1F46E && cp <= 0x1F4AC) return true;
+    if (cp == 0x1F4AD) return true;
+    if (cp >= 0x1F4AE && cp <= 0x1F4B5) return true;
+    if (cp >= 0x1F4B6 && cp <= 0x1F4B7) return true;
+    if (cp >= 0x1F4B8 && cp <= 0x1F4EB) return true;
+    if (cp >= 0x1F4EC && cp <= 0x1F4ED) return true;
+    if (cp == 0x1F4EE) return true;
+    if (cp == 0x1F4EF) return true;
+    if (cp >= 0x1F4F0 && cp <= 0x1F4F4) return true;
+    if (cp == 0x1F4F5) return true;
+    if (cp >= 0x1F4F6 && cp <= 0x1F4F7) return true;
+    if (cp == 0x1F4F8) return true;
+    if (cp >= 0x1F4F9 && cp <= 0x1F4FC) return true;
+    if (cp == 0x1F4FD) return true;
+    if (cp >= 0x1F4FF && cp <= 0x1F502) return true;
+    if (cp == 0x1F503) return true;
+    if (cp >= 0x1F504 && cp <= 0x1F507) return true;
+    if (cp == 0x1F508) return true;
+    if (cp == 0x1F509) return true;
+    if (cp >= 0x1F50A && cp <= 0x1F514) return true;
+    if (cp == 0x1F515) return true;
+    if (cp >= 0x1F516 && cp <= 0x1F52B) return true;
+    if (cp >= 0x1F52C && cp <= 0x1F52D) return true;
+    if (cp >= 0x1F52E && cp <= 0x1F53D) return true;
+    if (cp >= 0x1F549 && cp <= 0x1F54A) return true;
+    if (cp >= 0x1F54B && cp <= 0x1F54E) return true;
+    if (cp >= 0x1F550 && cp <= 0x1F55B) return true;
+    if (cp >= 0x1F55C && cp <= 0x1F567) return true;
+    if (cp >= 0x1F56F && cp <= 0x1F570) return true;
+    if (cp >= 0x1F573 && cp <= 0x1F579) return true;
+    if (cp == 0x1F57A) return true;
+    if (cp == 0x1F587) return true;
+    if (cp >= 0x1F58A && cp <= 0x1F58D) return true;
+    if (cp == 0x1F590) return true;
+    if (cp >= 0x1F595 && cp <= 0x1F596) return true;
+    if (cp == 0x1F5A4) return true;
+    if (cp == 0x1F5A5) return true;
+    if (cp == 0x1F5A8) return true;
+    if (cp >= 0x1F5B1 && cp <= 0x1F5B2) return true;
+    if (cp == 0x1F5BC) return true;
+    if (cp >= 0x1F5C2 && cp <= 0x1F5C4) return true;
+    if (cp >= 0x1F5D1 && cp <= 0x1F5D3) return true;
+    if (cp >= 0x1F5DC && cp <= 0x1F5DE) return true;
+    if (cp == 0x1F5E1) return true;
+    if (cp == 0x1F5E3) return true;
+    if (cp == 0x1F5E8) return true;
+    if (cp == 0x1F5EF) return true;
+    if (cp == 0x1F5F3) return true;
+    if (cp == 0x1F5FA) return true;
+    if (cp >= 0x1F5FB && cp <= 0x1F5FF) return true;
+    if (cp == 0x1F600) return true;
+    if (cp >= 0x1F601 && cp <= 0x1F606) return true;
+    if (cp >= 0x1F607 && cp <= 0x1F608) return true;
+    if (cp >= 0x1F609 && cp <= 0x1F60D) return true;
+    if (cp == 0x1F60E) return true;
+    if (cp == 0x1F60F) return true;
+    if (cp == 0x1F610) return true;
+    if (cp == 0x1F611) return true;
+    if (cp >= 0x1F612 && cp <= 0x1F614) return true;
+    if (cp == 0x1F615) return true;
+    if (cp == 0x1F616) return true;
+    if (cp == 0x1F617) return true;
+    if (cp == 0x1F618) return true;
+    if (cp == 0x1F619) return true;
+    if (cp == 0x1F61A) return true;
+    if (cp == 0x1F61B) return true;
+    if (cp >= 0x1F61C && cp <= 0x1F61E) return true;
+    if (cp == 0x1F61F) return true;
+    if (cp >= 0x1F620 && cp <= 0x1F625) return true;
+    if (cp >= 0x1F626 && cp <= 0x1F627) return true;
+    if (cp >= 0x1F628 && cp <= 0x1F62B) return true;
+    if (cp == 0x1F62C) return true;
+    if (cp == 0x1F62D) return true;
+    if (cp >= 0x1F62E && cp <= 0x1F62F) return true;
+    if (cp >= 0x1F630 && cp <= 0x1F633) return true;
+    if (cp == 0x1F634) return true;
+    if (cp == 0x1F635) return true;
+    if (cp == 0x1F636) return true;
+    if (cp >= 0x1F637 && cp <= 0x1F640) return true;
+    if (cp >= 0x1F641 && cp <= 0x1F644) return true;
+    if (cp >= 0x1F645 && cp <= 0x1F64F) return true;
+    if (cp == 0x1F680) return true;
+    if (cp >= 0x1F681 && cp <= 0x1F682) return true;
+    if (cp >= 0x1F683 && cp <= 0x1F685) return true;
+    if (cp == 0x1F686) return true;
+    if (cp == 0x1F687) return true;
+    if (cp == 0x1F688) return true;
+    if (cp == 0x1F689) return true;
+    if (cp >= 0x1F68A && cp <= 0x1F68B) return true;
+    if (cp == 0x1F68C) return true;
+    if (cp == 0x1F68D) return true;
+    if (cp == 0x1F68E) return true;
+    if (cp == 0x1F68F) return true;
+    if (cp == 0x1F690) return true;
+    if (cp >= 0x1F691 && cp <= 0x1F693) return true;
+    if (cp == 0x1F694) return true;
+    if (cp == 0x1F695) return true;
+    if (cp == 0x1F696) return true;
+    if (cp == 0x1F697) return true;
+    if (cp == 0x1F698) return true;
+    if (cp >= 0x1F699 && cp <= 0x1F69A) return true;
+    if (cp >= 0x1F69B && cp <= 0x1F6A1) return true;
+    if (cp == 0x1F6A2) return true;
+    if (cp == 0x1F6A3) return true;
+    if (cp >= 0x1F6A4 && cp <= 0x1F6A5) return true;
+    if (cp == 0x1F6A6) return true;
+    if (cp >= 0x1F6A7 && cp <= 0x1F6AD) return true;
+    if (cp >= 0x1F6AE && cp <= 0x1F6B1) return true;
+    if (cp == 0x1F6B2) return true;
+    if (cp >= 0x1F6B3 && cp <= 0x1F6B5) return true;
+    if (cp == 0x1F6B6) return true;
+    if (cp >= 0x1F6B7 && cp <= 0x1F6B8) return true;
+    if (cp >= 0x1F6B9 && cp <= 0x1F6BE) return true;
+    if (cp == 0x1F6BF) return true;
+    if (cp == 0x1F6C0) return true;
+    if (cp >= 0x1F6C1 && cp <= 0x1F6C5) return true;
+    if (cp == 0x1F6CB) return true;
+    if (cp == 0x1F6CC) return true;
+    if (cp >= 0x1F6CD && cp <= 0x1F6CF) return true;
+    if (cp == 0x1F6D0) return true;
+    if (cp >= 0x1F6D1 && cp <= 0x1F6D2) return true;
+    if (cp == 0x1F6D5) return true;
+    if (cp >= 0x1F6D6 && cp <= 0x1F6D7) return true;
+    if (cp >= 0x1F6DD && cp <= 0x1F6DF) return true;
+    if (cp >= 0x1F6E0 && cp <= 0x1F6E5) return true;
+    if (cp == 0x1F6E9) return true;
+    if (cp >= 0x1F6EB && cp <= 0x1F6EC) return true;
+    if (cp == 0x1F6F0) return true;
+    if (cp == 0x1F6F3) return true;
+    if (cp >= 0x1F6F4 && cp <= 0x1F6F6) return true;
+    if (cp >= 0x1F6F7 && cp <= 0x1F6F8) return true;
+    if (cp == 0x1F6F9) return true;
+    if (cp == 0x1F6FA) return true;
+    if (cp >= 0x1F6FB && cp <= 0x1F6FC) return true;
+    if (cp >= 0x1F7E0 && cp <= 0x1F7EB) return true;
+    if (cp == 0x1F7F0) return true;
+    if (cp == 0x1F90C) return true;
+    if (cp >= 0x1F90D && cp <= 0x1F90F) return true;
+    if (cp >= 0x1F910 && cp <= 0x1F918) return true;
+    if (cp >= 0x1F919 && cp <= 0x1F91E) return true;
+    if (cp == 0x1F91F) return true;
+    if (cp >= 0x1F920 && cp <= 0x1F927) return true;
+    if (cp >= 0x1F928 && cp <= 0x1F92F) return true;
+    if (cp == 0x1F930) return true;
+    if (cp >= 0x1F931 && cp <= 0x1F932) return true;
+    if (cp >= 0x1F933 && cp <= 0x1F93A) return true;
+    if (cp >= 0x1F93C && cp <= 0x1F93E) return true;
+    if (cp == 0x1F93F) return true;
+    if (cp >= 0x1F940 && cp <= 0x1F945) return true;
+    if (cp >= 0x1F947 && cp <= 0x1F94B) return true;
+    if (cp == 0x1F94C) return true;
+    if (cp >= 0x1F94D && cp <= 0x1F94F) return true;
+    if (cp >= 0x1F950 && cp <= 0x1F95E) return true;
+    if (cp >= 0x1F95F && cp <= 0x1F96B) return true;
+    if (cp >= 0x1F96C && cp <= 0x1F970) return true;
+    if (cp == 0x1F971) return true;
+    if (cp == 0x1F972) return true;
+    if (cp >= 0x1F973 && cp <= 0x1F976) return true;
+    if (cp >= 0x1F977 && cp <= 0x1F978) return true;
+    if (cp == 0x1F979) return true;
+    if (cp == 0x1F97A) return true;
+    if (cp == 0x1F97B) return true;
+    if (cp >= 0x1F97C && cp <= 0x1F97F) return true;
+    if (cp >= 0x1F980 && cp <= 0x1F984) return true;
+    if (cp >= 0x1F985 && cp <= 0x1F991) return true;
+    if (cp >= 0x1F992 && cp <= 0x1F997) return true;
+    if (cp >= 0x1F998 && cp <= 0x1F9A2) return true;
+    if (cp >= 0x1F9A3 && cp <= 0x1F9A4) return true;
+    if (cp >= 0x1F9A5 && cp <= 0x1F9AA) return true;
+    if (cp >= 0x1F9AB && cp <= 0x1F9AD) return true;
+    if (cp >= 0x1F9AE && cp <= 0x1F9AF) return true;
+    if (cp >= 0x1F9B0 && cp <= 0x1F9B9) return true;
+    if (cp >= 0x1F9BA && cp <= 0x1F9BF) return true;
+    if (cp == 0x1F9C0) return true;
+    if (cp >= 0x1F9C1 && cp <= 0x1F9C2) return true;
+    if (cp >= 0x1F9C3 && cp <= 0x1F9CA) return true;
+    if (cp == 0x1F9CB) return true;
+    if (cp == 0x1F9CC) return true;
+    if (cp >= 0x1F9CD && cp <= 0x1F9CF) return true;
+    if (cp >= 0x1F9D0 && cp <= 0x1F9E6) return true;
+    if (cp >= 0x1F9E7 && cp <= 0x1F9FF) return true;
+    if (cp >= 0x1FA70 && cp <= 0x1FA73) return true;
+    if (cp == 0x1FA74) return true;
+    if (cp >= 0x1FA78 && cp <= 0x1FA7A) return true;
+    if (cp >= 0x1FA7B && cp <= 0x1FA7C) return true;
+    if (cp >= 0x1FA80 && cp <= 0x1FA82) return true;
+    if (cp >= 0x1FA83 && cp <= 0x1FA86) return true;
+    if (cp >= 0x1FA90 && cp <= 0x1FA95) return true;
+    if (cp >= 0x1FA96 && cp <= 0x1FAA8) return true;
+    if (cp >= 0x1FAA9 && cp <= 0x1FAAC) return true;
+    if (cp >= 0x1FAB0 && cp <= 0x1FAB6) return true;
+    if (cp >= 0x1FAB7 && cp <= 0x1FABA) return true;
+    if (cp >= 0x1FAC0 && cp <= 0x1FAC2) return true;
+    if (cp >= 0x1FAC3 && cp <= 0x1FAC5) return true;
+    if (cp >= 0x1FAD0 && cp <= 0x1FAD6) return true;
+    if (cp >= 0x1FAD7 && cp <= 0x1FAD9) return true;
+    if (cp >= 0x1FAE0 && cp <= 0x1FAE7) return true;
+    if (cp >= 0x1FAF0 && cp <= 0x1FAF6) return true;
     return false;
 }
 
 static int get_char_width(wchar_t wc) {
-    int w = wcwidth(wc);
     int cp = (int)wc;
-    // Fix glibc bug: emoji возвращают width=1 вместо 2
-    if (w == 1 && is_emoji_codepoint(cp)) return 2;
-    // Variation selector добавляет +1 к ширине базового символа
-    return w;
+    if (is_emoji_presentation(cp)) return 2;
+    if (is_emoji_codepoint(cp)) return 1; // без VS16 — текстовый
+    int w = wcwidth(wc);
+    return (w > 0) ? w : 0;
 }
 
 
@@ -102,6 +765,44 @@ static int get_char_width(wchar_t wc) {
 #define C_H3      "\033[1;33m"
 
 // ─────────────────────────── Вспомогательная функция ─────────
+// Заменяет emoji-флаги (пары Regional Indicator) на текстовый код [XX]
+static std::string replace_flags(const std::string &s) {
+    std::string result;
+    result.reserve(s.size());
+    size_t i = 0;
+    while (i < s.size()) {
+        wchar_t wc = 0;
+        int clen = mbtowc(&wc, s.c_str() + i, MB_CUR_MAX);
+        if (clen <= 0) { result += s[i++]; continue; }
+        int cp = (int)wc;
+        if (cp >= 0x1F1E0 && cp <= 0x1F1FF) {
+            // Первая буква флага
+            char letter1 = 'A' + (cp - 0x1F1E6);
+            i += clen;
+            if (i < s.size()) {
+                wchar_t next_cp = 0;
+                int next_clen = mbtowc(&next_cp, s.c_str() + i, MB_CUR_MAX);
+                if (next_clen > 0 && next_cp >= 0x1F1E0 && next_cp <= 0x1F1FF) {
+                    char letter2 = 'A' + (next_cp - 0x1F1E6);
+                    result += '[';
+                    result += letter1;
+                    result += letter2;
+                    result += ']';
+                    i += next_clen;
+                    continue;
+                }
+            }
+            result += '[';
+            result += letter1;
+            result += ']';
+            continue;
+        }
+        result.append(s, i, clen);
+        i += clen;
+    }
+    return result;
+}
+
 static std::string get_home_dir() {
     const char* h = getenv("HOME");
     return h ? std::string(h) : "/tmp";
@@ -116,7 +817,7 @@ static std::string get_home_dir() {
 #define DEFAULT_MAX_TOKENS  4096
 
 // ─────────────────────────── Версия ───────────────────────────
-#define APP_VERSION "1.0.4"
+#define APP_VERSION "1.0.5"
 
 
 static std::string HISTORY_FILE;
@@ -150,6 +851,7 @@ struct ChatSession {
     int               total_completion_tokens = 0;
     bool              autorun                 = false;
     bool              history_enabled          = false;
+    bool              nores                    = false;
 };
 
 static ChatSession G;
@@ -160,18 +862,11 @@ static ChatSession G;
 static volatile sig_atomic_t g_exit_requested = 0;
 static volatile sig_atomic_t g_stream_abort   = 0;
 static volatile sig_atomic_t g_in_streaming   = 0; // 1 пока идёт стриминг
-static volatile sig_atomic_t g_bash_abort      = 0; // 1 = прервать bash-команду
-static volatile sig_atomic_t g_bash_running    = 0; // 1 пока выполняется bash
-static pid_t                   g_bash_pid       = 0; // PID bash-процесса
 static std::mutex g_stream_mutex;  // Мьютекс для защиты потоков
 
 static void signal_handler(int /*sig*/) {
     // Только sig_atomic_t операции — mutex нельзя использовать в обработчике сигнала (не async-signal-safe)
-    if (g_bash_running) {
-        g_bash_abort = 1;
-        // Отправляем SIGINT дочернему процессу
-        if (g_bash_pid > 0) kill(g_bash_pid, SIGINT);
-    } else if (g_in_streaming) {
+    if (g_in_streaming) {
         g_stream_abort = 1;
     } else {
         g_exit_requested = 1;
@@ -305,12 +1000,12 @@ static bool needs_variation_selector(wchar_t cp) {
 }
 
 static size_t visible_width(const std::string &s) {
-    // 1. Strip ANSI escape sequences
+    // 1. Убираем ANSI escape-последовательности
     std::string stripped;
     stripped.reserve(s.size());
     size_t i = 0;
     while (i < s.size()) {
-        if (s[i] == '') {
+        if (s[i] == '\033') {
             ++i;
             if (i < s.size() && s[i] == '[') {
                 ++i;
@@ -321,62 +1016,85 @@ static size_t visible_width(const std::string &s) {
         }
         stripped += s[i++];
     }
-
-    // 2. Decode UTF-8 and calculate visual width
+    
+    // 2. Декодируем UTF-8, считаем ширину с учётом emoji и variation selectors
     size_t w = 0;
     i = 0;
-    mbtowc(nullptr, nullptr, 0);
     while (i < stripped.size()) {
         wchar_t wc = 0;
         int clen = mbtowc(&wc, stripped.c_str() + i, MB_CUR_MAX);
-        if (clen <= 0) { ++i; continue; }
+        if (clen <= 0) { i++; continue; }
+
         int cp = (int)wc;
 
-        // Zero-width characters
-        if ((cp >= 0xFE00 && cp <= 0xFE0F) ||
-            (cp >= 0xE0100 && cp <= 0xE01EF) ||
-            cp == 0x200D ||
-            cp == 0x200B ||
-            cp == 0x200C ||
-            cp == 0x2060 ||
-            cp == 0xFEFF) {
+        // Пропускаем zero-width символы: ZWJ, ZWNJ, variation selectors, combining
+        if (cp == 0x200D || cp == 0x200C || cp == 0xFE0F || cp == 0xFE0E ||
+            (cp >= 0x200B && cp <= 0x200F) || cp == 0xFEFF ||
+            (cp >= 0x20D0 && cp <= 0x20FF) ||  // combining enclosing
+            (cp >= 0xFE00 && cp <= 0xFE0F) ||  // variation selectors
+            (cp >= 0xE0000 && cp <= 0xE01FF) || // tags
+            (cp >= 0x1F3FB && cp <= 0x1F3FF)) { // skin tone modifiers
             i += clen;
             continue;
         }
 
-        // Regional Indicator pairs (flags)
-        if (cp >= 0x1F1E6 && cp <= 0x1F1FF) {
-            int flag_count = 0;
-            size_t j = i;
-            while (j < stripped.size()) {
-                wchar_t fw = 0;
-                int fl = mbtowc(&fw, stripped.c_str() + j, MB_CUR_MAX);
-                if (fl <= 0) break;
-                int fcp = (int)fw;
-                if (fcp >= 0x1F1E6 && fcp <= 0x1F1FF) {
-                    flag_count++;
-                    j += fl;
-                } else break;
+        // Флаги стран: пара Regional Indicator (U+1F1E0..U+1F1FF) = 1 глиф шириной 2
+        if (cp >= 0x1F1E0 && cp <= 0x1F1FF) {
+            i += clen;
+            // Пропускаем второй Regional Indicator если есть
+            if (i < stripped.size()) {
+                wchar_t next_cp = 0;
+                int next_clen = mbtowc(&next_cp, stripped.c_str() + i, MB_CUR_MAX);
+                if (next_clen > 0 && next_cp >= 0x1F1E0 && next_cp <= 0x1F1FF)
+                    i += next_clen;
             }
-            w += (flag_count / 2) * 2;
-            i = j;
+            w += 2;
             continue;
         }
 
-        // All emoji codepoints — double-width
-        if (is_emoji_codepoint(cp)) {
+        // Emoji_Presentation — всегда ширина 2
+        if (is_emoji_presentation(cp)) {
             w += 2;
             i += clen;
+            // Пропускаем VS16 если есть
+            if (i < stripped.size()) {
+                wchar_t next_cp = 0;
+                int next_clen = mbtowc(&next_cp, stripped.c_str() + i, MB_CUR_MAX);
+                if (next_clen > 0 && (next_cp == 0xFE0F || next_cp == 0xFE0E))
+                    i += next_clen;
+            }
             continue;
         }
 
-        // Regular characters
+        // Emoji только с VS16 — ширина 2, без VS16 — по wcwidth
+        if (is_emoji_codepoint(cp)) {
+            i += clen;
+            bool has_vs16 = false;
+            if (i < stripped.size()) {
+                wchar_t next_cp = 0;
+                int next_clen = mbtowc(&next_cp, stripped.c_str() + i, MB_CUR_MAX);
+                if (next_clen > 0 && (next_cp == 0xFE0F || next_cp == 0xFE0E)) {
+                    has_vs16 = true;
+                    i += next_clen;
+                }
+            }
+            if (has_vs16) {
+                w += 2;
+            } else {
+                int char_w = wcwidth(wc);
+                w += (char_w > 0) ? char_w : 1;
+            }
+            continue;
+        }
+
+        // Обычный символ — wcwidth
         int char_w = wcwidth(wc);
         if (char_w > 0) w += char_w;
         i += clen;
     }
     return w;
 }
+
 
 static std::vector<size_t> g_table_col_widths;
 
@@ -498,7 +1216,7 @@ static void render_markdown(const std::string &text) {
 
         // ── Markdown таблицы (двухпроходный рендер) ──
         if (line.find('|') != std::string::npos) {
-            auto first_cells = split_table_cells(line);
+            auto first_cells = split_table_cells(replace_flags(line));
             if (first_cells.size() >= 2) {
                 auto check_sep = [](const std::string &l) -> bool {
                     bool has_dash = false;
@@ -520,7 +1238,7 @@ static void render_markdown(const std::string &text) {
                     if (next_line.find('|') == std::string::npos) {
                         has_leftover = true; leftover = next_line; break;
                     }
-                    auto nc = split_table_cells(next_line);
+                    auto nc = split_table_cells(replace_flags(next_line));
                     if (nc.size() < 2) { has_leftover = true; leftover = next_line; break; }
                     is_sep_row.push_back(check_sep(next_line));
                     table_rows.push_back(nc);
@@ -670,100 +1388,24 @@ static std::string shell_escape(const std::string& s) {
 }
 
 std::string exec_with_timeout(const std::string& cmd, int timeout_sec) {
-    int pipefd[2];
-    if (pipe(pipefd) == -1) return "[pipe failed]";
-
-    g_bash_abort = 0;
-    g_bash_pid = fork();
-
-    if (g_bash_pid < 0) {
-        close(pipefd[0]); close(pipefd[1]);
-        return "[fork failed]";
-    }
-
-    if (g_bash_pid == 0) {
-        // Дочерний процесс
-        close(pipefd[0]);
-        dup2(pipefd[1], STDOUT_FILENO);
-        dup2(pipefd[1], STDERR_FILENO);
-        close(pipefd[1]);
-        execl("/bin/bash", "bash", "-c", cmd.c_str(), (char*)NULL);
-        _exit(127);
-    }
-
-    // Родительский процесс
-    close(pipefd[1]);
-    g_bash_running = 1;
-
+    std::string safe_cmd = "timeout " + std::to_string(timeout_sec) +
+                           " bash -c " + shell_escape(cmd) + " 2>&1";
     std::string result;
-    char buffer[4096];
-
-    // Неблокирующее чтение для возможности проверки g_bash_abort
-    auto start_time = std::chrono::steady_clock::now();
-
-    while (true) {
-        if (g_bash_abort) {
-            kill(g_bash_pid, SIGINT);
-            std::this_thread::sleep_for(std::chrono::milliseconds(200));
-            kill(g_bash_pid, SIGKILL);
-            result += "\n[ПРЕРВАНО: Ctrl+C]";
-            break;
-        }
-
-        // Проверяем таймаут
-        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
-            std::chrono::steady_clock::now() - start_time).count();
-        if (elapsed >= timeout_sec) {
-            kill(g_bash_pid, SIGTERM);
-            std::this_thread::sleep_for(std::chrono::milliseconds(200));
-            kill(g_bash_pid, SIGKILL);
-            result += "\n[ТАЙМАУТ: команда прервана после " + std::to_string(timeout_sec) + " сек]";
-            break;
-        }
-
-        // Неблокирующее чтение через select
-        fd_set fds;
-        FD_ZERO(&fds);
-        FD_SET(pipefd[0], &fds);
-        struct timeval tv;
-        tv.tv_sec = 0;
-        tv.tv_usec = 200000; // 200ms
-
-        int sel = select(pipefd[0] + 1, &fds, nullptr, nullptr, &tv);
-        if (sel > 0 && FD_ISSET(pipefd[0], &fds)) {
-            ssize_t n = read(pipefd[0], buffer, sizeof(buffer));
-            if (n > 0) {
-                result.append(buffer, n);
-                if (result.size() > (size_t)MAX_CMD_OUTPUT) {
-                    size_t cut = MAX_CMD_OUTPUT;
-                    while (cut > 0 && (result[cut] & 0xC0) == 0x80) --cut;
-                    result = result.substr(0, cut) +
-                             "\n[...вывод обрезан, превышен лимит " +
-                             std::to_string(MAX_CMD_OUTPUT) + " байт...]";
-                    kill(g_bash_pid, SIGKILL);
-                    break;
-                }
-            } else if (n == 0) {
-                // EOF — процесс завершился
-                break;
-            }
-        }
-        // sel == 0 — таймаут select, продолжаем цикл
+    char buffer[256];
+    FILE* pipe = popen(safe_cmd.c_str(), "r");
+    if (!pipe) return "[popen failed]";
+    while (fgets(buffer, sizeof(buffer), pipe) != nullptr)
+        result += buffer;
+    int ret = pclose(pipe);
+    if (WIFEXITED(ret) && WEXITSTATUS(ret) == 124)
+        result += "\n[ТАЙМАУТ: команда прервана после " + std::to_string(timeout_sec) + " сек]";
+    if (result.size() > (size_t)MAX_CMD_OUTPUT) {
+        size_t cut = MAX_CMD_OUTPUT;
+        while (cut > 0 && (result[cut] & 0xC0) == 0x80) --cut;
+        result = result.substr(0, cut) +
+                 "\n[...вывод обрезан, превышен лимит " +
+                 std::to_string(MAX_CMD_OUTPUT) + " байт...]";
     }
-
-    close(pipefd[0]);
-
-    // Забираем код возврата
-    int status = 0;
-    if (!g_bash_abort) {
-        waitpid(g_bash_pid, &status, 0);
-    } else {
-        waitpid(g_bash_pid, &status, WNOHANG);
-    }
-
-    g_bash_running = 0;
-    g_bash_pid = 0;
-
     return result;
 }
 
@@ -818,7 +1460,8 @@ std::string execute_single_bash(const std::string &bash_code, int idx, int total
     }
     std::cout << C_YELLOW << "[Выполняю...]" << C_RESET << std::endl;
     std::string result = exec_with_timeout(bash_code, CMD_TIMEOUT);
-    std::cout << C_BLUE << "[Результат]:\n" << result << C_RESET << std::endl;
+    if (!G.nores)
+        std::cout << C_BLUE << "[Результат]:\n" << result << C_RESET << std::endl;
     return result;
 }
 
@@ -1048,7 +1691,9 @@ void process_response(const std::string &content, bool aborted, size_t msgs_befo
     };
 
     // ── Функция: вывести ответ по частям, останавливаясь на bash-блоках ──
-    auto render_and_execute = [&](const std::string &text) -> std::string {
+    // leftover — текст после последнего bash-блока (не рендерится, ждёт результатов)
+    auto render_and_execute = [&](const std::string &text, std::string &leftover) -> std::string {
+        leftover = "";
         auto bbs = find_bash_blocks(text);
         if (bbs.empty()) {
             std::cout << "\n" << C_BOLD << C_CYAN << "[Ассистент]:" << C_RESET << "\n";
@@ -1083,23 +1728,27 @@ void process_response(const std::string &content, bool aborted, size_t msgs_befo
             cur = bbs[i].blk_e;
         }
 
-        // Текст после последнего блока
+        // Текст после последнего блока — НЕ рендерим, сохраняем как leftover
         if (cur < text.size()) {
-            render_markdown(text.substr(cur));
+            leftover = text.substr(cur);
         }
         std::cout << std::endl;
         return combined_result;
     };
 
     // ── Основная логика ──
-    std::string cmd_result = render_and_execute(content);
+    std::string leftover;
+    std::string cmd_result = render_and_execute(content, leftover);
+
+    // В контекст сохраняем весь ответ целиком (leftover будет показан после результатов)
     G.messages.push_back({{"role", "assistant"}, {"content", content}});
 
     // Цикл: если были bash-результаты, отправляем модели
     const int MAX_BASH_CHAIN = 7;
     for (int chain = 0; chain < MAX_BASH_CHAIN && !cmd_result.empty(); ++chain) {
-        G.messages.push_back({{"role", "user"},
-            {"content", "[Результат выполнения команды]:\n" + cmd_result}});
+        // Если был leftover — добавляем его перед результатами в сообщение user
+        std::string user_msg = "[Результат выполнения команды]:\n" + cmd_result;
+        G.messages.push_back({{"role", "user"}, {"content", user_msg}});
 
         bool chain_aborted = false;
         std::string next = do_api_request(chain_aborted);
@@ -1112,8 +1761,16 @@ void process_response(const std::string &content, bool aborted, size_t msgs_befo
             break;
         }
 
-        cmd_result = render_and_execute(next);
+        std::string next_leftover;
+        cmd_result = render_and_execute(next, next_leftover);
         G.messages.push_back({{"role", "assistant"}, {"content", next}});
+        leftover = next_leftover;
+    }
+
+    // Если остался leftover и bash-цикл завершился (cmd_result пуст) — рендерим его
+    if (!leftover.empty() && cmd_result.empty()) {
+        render_markdown(leftover);
+        std::cout << std::endl;
     }
 
     // Автосохранение
@@ -1434,7 +2091,7 @@ void print_help() {
         << "  /maxtokens [N]     — показать/сменить max_tokens\n"
         << "  /system            — показать системный промпт\n"
         << "  /file <path> [msg] — загрузить файл и задать вопрос\n"
-        << "  /autorun           — вкл/выкл авто-выполнение bash\n"
+        << "  /autorun           — вкл/выкл авто-выполнение bash\n  /nores             — вкл/выкл вывод результатов bash\n"
         << "  /cost              — стоимость токенов в $\n"
         << "  /balance           — проверить баланс OpenRouter\n"
         << "  /update            — обновление программы\n"
@@ -1820,7 +2477,9 @@ std::setlocale(LC_ALL, "");
     std::cout << C_YELLOW << "Модель: " << G.model << C_RESET << std::endl;
     std::cout << C_YELLOW << "Введите /help для справки" << C_RESET << std::endl;
     std::cout << C_GRAY   << "Autorun: " << (G.autorun ? "вкл" : "выкл")
-              << " (переключить: /autorun)" << C_RESET;
+              << " (переключить: /autorun)" << C_RESET
+              << C_GRAY << " Вывод результатов: " << (G.nores ? C_RED "выкл" : C_GREEN "вкл")
+              << C_RESET;
     std::cout << C_GRAY   << " История: " << (G.history_enabled ? "вкл" : "выкл")
               << " (переключить: /history on|off)" << C_RESET << std::endl;
     std::cout << C_GRAY   << "Подсказка: пустой Enter — отправить, '//' — отправить, "
@@ -1873,6 +2532,12 @@ std::setlocale(LC_ALL, "");
         }
         if (userAnswer == "/tokens")  { print_tokens();  continue; }
         if (userAnswer == "/cost")    { print_cost();    continue; }
+        if (userAnswer == "/nores") {
+            G.nores = !G.nores;
+            std::cout << C_YELLOW << "[Вывод результатов bash: "
+                      << (G.nores ? "ВЫКЛЮЧЕН" : "включён") << "]" << C_RESET << std::endl;
+            continue;
+        }
         if (userAnswer == "/autorun") {
             G.autorun = !G.autorun;
             std::cout << C_YELLOW << "[Autorun: "
