@@ -19,6 +19,10 @@
 #include "nlohmann/json.hpp"
 
 using json = nlohmann::json;
+// ─────────────────────────── Версия ───────────────────────────
+#define APP_VERSION "1.0.7"
+
+
 // Emoji codepoints где glibc wcwidth() неправильно возвращает 1
 static std::unordered_set<int> KNOWN_WIDE_EMOJI = {
     0x1F300, 0x1F301, 0x1F302, 0x1F303, 0x1F304, 0x1F305, 0x1F306, 0x1F307,
@@ -815,9 +819,6 @@ static std::string get_home_dir() {
 #define MAX_MESSAGES        500
 #define DEFAULT_TEMPERATURE 0.7
 #define DEFAULT_MAX_TOKENS  4096
-
-// ─────────────────────────── Версия ───────────────────────────
-#define APP_VERSION "1.0.6"
 
 
 static std::string HISTORY_FILE;
