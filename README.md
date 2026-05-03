@@ -29,7 +29,7 @@
     curl -fsSL https://raw.githubusercontent.com/nlohmann/json/develop/single_include/nlohmann/json.hpp \
          -o ~/.local/include/nlohmann/json.hpp
     curl -fsSL https://raw.githubusercontent.com/swarik/Chat-Assist/main/sw_chat.cpp > sw_chat.cpp
-    g++ -std=c++17 -O2 -I~/.local/include -o sw_chat sw_chat.cpp -lreadline -lcurl
+    g++ -std=c++17 -O2 -I~/.local/include -o sw_chat sw_chat.cpp -lreadline -lcurl -lpthread 
     cp sw_chat ~/.local/bin/
 
 ## API ключ
