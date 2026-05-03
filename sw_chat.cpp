@@ -829,7 +829,8 @@ static std::string READLINE_HIST_FILE;
 struct ChatSession {
     std::vector<json> messages;
     std::string       history_file;
-
+    // ****************   модель по умолчанию ******************
+    //
     //std::string       model          = "nvidia/nemotron-3-super-120b-a12b:free";
     //std::string       model          = "minimax/minimax-m2.7";
     //std::string       model          = "anthropic/claude-sonnet-4";
@@ -840,9 +841,12 @@ struct ChatSession {
     //std::string       model          = "qwen/qwen3.6-plus:free";
     //std::string       model          = "xiaomi/mimo-v2-flash";
     //std::string       model          = "xiaomi/mimo-v2-pro"
-    //std::string       model          = "nex-agi/deepseek-v3.2";
+     std::string       model          = "deepseek/deepseek-v4-pro";
     //std::string       model          = "anthropic/claude-opus-4.6";
-    std::string       model          = "anthropic/claude-sonnet-4.6";
+    //std::string       model          = "~google/gemini-pro-latest";
+    //std::string       model          = "~anthropic/claude-sonnet-latest";
+    //std::string       model          = "qwen/qwen3.6-max-preview";
+    //std::string       model          = "anthropic/claude-sonnet-4.6";
 
 
     std::string       sys_prompt;
@@ -2039,18 +2043,17 @@ void do_exit() {
 // ─────────────────────── Список моделей ──────────────────────
 static const std::vector<std::string> AVAILABLE_MODELS = {
     "anthropic/claude-opus-4.6",
-    "nvidia/nemotron-3-super-120b-a12b:free",
     "minimax/minimax-m2.7",
-    "anthropic/claude-sonnet-4",
     "openai/gpt-5.2",
     "google/gemini-3.1-pro-preview",
     "x-ai/grok-4",
-    "qwen/qwen3-max-thinking",
     "xiaomi/mimo-v2-flash",
-    "nex-agi/deepseek-v3.1-nex-n1",
+    "deepseek/deepseek-v4-pro",
     "anthropic/claude-sonnet-4.6",
     "xiaomi/mimo-v2-pro",
-    "qwen/qwen3.6-plus:free",
+    "~google/gemini-pro-latest",
+    "~anthropic/claude-sonnet-latest",
+    "qwen/qwen3.6-max-preview"
 };
 
 void cmd_model_select() {
@@ -2240,28 +2243,31 @@ struct ModelPricing {
 };
 
 static const ModelPricing KNOWN_PRICING[] = {
-    {"anthropic/claude-opus",      5.0,   25.0},
-    {"anthropic/claude-sonnet",    3.0,   15.0},
-    {"anthropic/claude-haiku",     1.0,    5.0},
-    {"openai/gpt-5",               2.5,   15.0},
-    {"openai/gpt-4.1",             2.0,    8.0},
-    {"openai/gpt-4.1-mini",        0.4,    1.6},
-    {"openai/gpt-4.1-nano",        0.1,    0.4},
-    {"openai/o3",                  2.0,    8.0},
-    {"openai/o4-mini",             1.1,    4.4},
-    {"google/gemini-2.5-pro",      1.25,  10.0},
-    {"google/gemini-2.5-flash",    0.3,    2.5},
-    {"google/gemini-3",            2.0,   12.0},
-    {"x-ai/grok-4",                3.0,   15.0},
-    {"x-ai/grok-3",                3.0,   15.0},
-    {"x-ai/grok-3-mini",           0.3,    0.5},
-    {"deepseek/deepseek-r1",       0.7,    2.5},
-    {"deepseek/deepseek-chat",     0.26,  0.38},
-    {"qwen/qwen3",                 0.39,  2.34},
-    {"meta-llama/llama-4",         0.15,   0.6},
-    {"minimax/minimax-m2.7",       0.3,    1.2},
-    {"xiaomi/mimo-v2-pro",         1.0,    3.0},
-    {"qwen/qwen3.6-plus:free",     0.0,    0.0},
+    {"anthropic/claude-opus-4.7",       5.0,   25.0},
+    {"anthropic/claude-sonnet-4.6",     3.0,   15.0},
+    {"anthropic/claude-haiku",          1.0,    5.0},
+    {"openai/gpt-5",                    2.5,   15.0},
+    {"openai/gpt-4.1",                  2.0,    8.0},
+    {"openai/gpt-4.1-mini",             0.4,    1.6},
+    {"openai/gpt-4.1-nano",             0.1,    0.4},
+    {"openai/o3",                       2.0,    8.0},
+    {"openai/o4-mini",                  1.1,    4.4},
+    {"google/gemini-2.5-pro",           1.25,  10.0},
+    {"google/gemini-2.5-flash",         0.3,    2.5},
+    {"google/gemini-3",                 2.0,   12.0},
+    {"x-ai/grok-4",                     3.0,   15.0},
+    {"x-ai/grok-3",                     3.0,   15.0},
+    {"x-ai/grok-3-mini",                0.3,    0.5},
+    {"deepseek/deepseek-r1",            0.7,    2.5},
+    {"deepseek/deepseek-chat",          0.26,  0.38},
+    {"deepseek/deepseek-v4-pro",        0.435, 0.87},
+    {"qwen/qwen3",                      0.39,  2.34},
+    {"meta-llama/llama-4",              0.15,   0.6},
+    {"minimax/minimax-m2.7",            0.3,    1.2},
+    {"xiaomi/mimo-v2-pro",              1.0,    3.0},
+    {"~google/gemini-pro-latest",       1.05,   2.0},
+    {"~anthropic/claude-sonnet-latest", 1.0,    3.0},
+    {"qwen/qwen3.6-max-preview",        1.04,  6.24},
     {nullptr, 0, 0}
 };
 
