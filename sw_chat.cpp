@@ -20,7 +20,7 @@
 
 using json = nlohmann::json;
 // ─────────────────────────── Версия ───────────────────────────
-#define APP_VERSION "1.0.9"
+#define APP_VERSION "1.0.10"
 
 
 // Emoji codepoints где glibc wcwidth() неправильно возвращает 1
@@ -1900,7 +1900,7 @@ void cmd_update() {
     // 4. Скомпилировать
     std::cout << C_YELLOW << "[update] Компиляция..." << C_RESET << std::endl;
     std::string compile_cmd = "g++ -std=c++17 -O2 -I" + home + "/.local/include -o "
-        + new_bin + " " + new_src + " -lreadline -lcurl 2>&1";
+        + new_bin + " " + new_src + " -lreadline -lcurl -lpthread 2>&1";
     std::string compile_out;
     {
         FILE *pipe = popen(compile_cmd.c_str(), "r");
