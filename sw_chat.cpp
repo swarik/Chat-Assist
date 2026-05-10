@@ -5,6 +5,11 @@
 #include <unistd.h>
 #include <fstream>
 #include <cstdio>
+#include <cctype>
+#include <unordered_map>
+#include <sys/stat.h>
+#include <dirent.h>
+#include <algorithm>
 #include <string>
 #include <vector>
 #include <signal.h>
@@ -20,8 +25,7 @@
 
 using json = nlohmann::json;
 // ─────────────────────────── Версия ───────────────────────────
-#define APP_VERSION "1.0.10"
-
+#define APP_VERSION "1.0.11"
 
 // Emoji codepoints где glibc wcwidth() неправильно возвращает 1
 static std::unordered_set<int> KNOWN_WIDE_EMOJI = {
@@ -62,682 +66,80 @@ static std::unordered_set<int> KNOWN_WIDE_EMOJI = {
 };
 
 // Emoji_Presentation: всегда отображается как emoji (ширина 2)
-static bool is_emoji_presentation(int cp) {
-    if (cp >= 0x231A && cp <= 0x231B) return true;
-    if (cp >= 0x23E9 && cp <= 0x23EC) return true;
-    if (cp == 0x23F0) return true;
-    if (cp == 0x23F3) return true;
-    if (cp >= 0x25FD && cp <= 0x25FE) return true;
-    if (cp >= 0x2614 && cp <= 0x2615) return true;
-    if (cp >= 0x2648 && cp <= 0x2653) return true;
-    if (cp == 0x267F) return true;
-    if (cp == 0x2693) return true;
-    if (cp == 0x26A1) return true;
-    if (cp >= 0x26AA && cp <= 0x26AB) return true;
-    if (cp >= 0x26BD && cp <= 0x26BE) return true;
-    if (cp >= 0x26C4 && cp <= 0x26C5) return true;
-    if (cp == 0x26CE) return true;
-    if (cp == 0x26D4) return true;
-    if (cp == 0x26EA) return true;
-    if (cp >= 0x26F2 && cp <= 0x26F3) return true;
-    if (cp == 0x26F5) return true;
-    if (cp == 0x26FA) return true;
-    if (cp == 0x26FD) return true;
-    if (cp == 0x2705) return true;
-    if (cp >= 0x270A && cp <= 0x270B) return true;
-    if (cp == 0x2728) return true;
-    if (cp == 0x274C) return true;
-    if (cp == 0x274E) return true;
-    if (cp >= 0x2753 && cp <= 0x2755) return true;
-    if (cp == 0x2757) return true;
-    if (cp >= 0x2795 && cp <= 0x2797) return true;
-    if (cp == 0x27B0) return true;
-    if (cp == 0x27BF) return true;
-    if (cp >= 0x2B1B && cp <= 0x2B1C) return true;
-    if (cp == 0x2B50) return true;
-    if (cp == 0x2B55) return true;
-    if (cp == 0x1F004) return true;
-    if (cp == 0x1F0CF) return true;
-    if (cp == 0x1F18E) return true;
-    if (cp >= 0x1F191 && cp <= 0x1F19A) return true;
-    // Regional Indicator обрабатываются отдельно (пары = флаги стран)
-    // if (cp >= 0x1F1E6 && cp <= 0x1F1FF) return true;
-    if (cp == 0x1F201) return true;
-    if (cp == 0x1F21A) return true;
-    if (cp == 0x1F22F) return true;
-    if (cp >= 0x1F232 && cp <= 0x1F236) return true;
-    if (cp >= 0x1F238 && cp <= 0x1F23A) return true;
-    if (cp >= 0x1F250 && cp <= 0x1F251) return true;
-    if (cp >= 0x1F300 && cp <= 0x1F30C) return true;
-    if (cp >= 0x1F30D && cp <= 0x1F30E) return true;
-    if (cp == 0x1F30F) return true;
-    if (cp == 0x1F310) return true;
-    if (cp == 0x1F311) return true;
-    if (cp == 0x1F312) return true;
-    if (cp >= 0x1F313 && cp <= 0x1F315) return true;
-    if (cp >= 0x1F316 && cp <= 0x1F318) return true;
-    if (cp == 0x1F319) return true;
-    if (cp == 0x1F31A) return true;
-    if (cp == 0x1F31B) return true;
-    if (cp == 0x1F31C) return true;
-    if (cp >= 0x1F31D && cp <= 0x1F31E) return true;
-    if (cp >= 0x1F31F && cp <= 0x1F320) return true;
-    if (cp >= 0x1F32D && cp <= 0x1F32F) return true;
-    if (cp >= 0x1F330 && cp <= 0x1F331) return true;
-    if (cp >= 0x1F332 && cp <= 0x1F333) return true;
-    if (cp >= 0x1F334 && cp <= 0x1F335) return true;
-    if (cp >= 0x1F337 && cp <= 0x1F34A) return true;
-    if (cp == 0x1F34B) return true;
-    if (cp >= 0x1F34C && cp <= 0x1F34F) return true;
-    if (cp == 0x1F350) return true;
-    if (cp >= 0x1F351 && cp <= 0x1F37B) return true;
-    if (cp == 0x1F37C) return true;
-    if (cp >= 0x1F37E && cp <= 0x1F37F) return true;
-    if (cp >= 0x1F380 && cp <= 0x1F393) return true;
-    if (cp >= 0x1F3A0 && cp <= 0x1F3C4) return true;
-    if (cp == 0x1F3C5) return true;
-    if (cp == 0x1F3C6) return true;
-    if (cp == 0x1F3C7) return true;
-    if (cp == 0x1F3C8) return true;
-    if (cp == 0x1F3C9) return true;
-    if (cp == 0x1F3CA) return true;
-    if (cp >= 0x1F3CF && cp <= 0x1F3D3) return true;
-    if (cp >= 0x1F3E0 && cp <= 0x1F3E3) return true;
-    if (cp == 0x1F3E4) return true;
-    if (cp >= 0x1F3E5 && cp <= 0x1F3F0) return true;
-    if (cp == 0x1F3F4) return true;
-    if (cp >= 0x1F3F8 && cp <= 0x1F407) return true;
-    if (cp == 0x1F408) return true;
-    if (cp >= 0x1F409 && cp <= 0x1F40B) return true;
-    if (cp >= 0x1F40C && cp <= 0x1F40E) return true;
-    if (cp >= 0x1F40F && cp <= 0x1F410) return true;
-    if (cp >= 0x1F411 && cp <= 0x1F412) return true;
-    if (cp == 0x1F413) return true;
-    if (cp == 0x1F414) return true;
-    if (cp == 0x1F415) return true;
-    if (cp == 0x1F416) return true;
-    if (cp >= 0x1F417 && cp <= 0x1F429) return true;
-    if (cp == 0x1F42A) return true;
-    if (cp >= 0x1F42B && cp <= 0x1F43E) return true;
-    if (cp == 0x1F440) return true;
-    if (cp >= 0x1F442 && cp <= 0x1F464) return true;
-    if (cp == 0x1F465) return true;
-    if (cp >= 0x1F466 && cp <= 0x1F46B) return true;
-    if (cp >= 0x1F46C && cp <= 0x1F46D) return true;
-    if (cp >= 0x1F46E && cp <= 0x1F4AC) return true;
-    if (cp == 0x1F4AD) return true;
-    if (cp >= 0x1F4AE && cp <= 0x1F4B5) return true;
-    if (cp >= 0x1F4B6 && cp <= 0x1F4B7) return true;
-    if (cp >= 0x1F4B8 && cp <= 0x1F4EB) return true;
-    if (cp >= 0x1F4EC && cp <= 0x1F4ED) return true;
-    if (cp == 0x1F4EE) return true;
-    if (cp == 0x1F4EF) return true;
-    if (cp >= 0x1F4F0 && cp <= 0x1F4F4) return true;
-    if (cp == 0x1F4F5) return true;
-    if (cp >= 0x1F4F6 && cp <= 0x1F4F7) return true;
-    if (cp == 0x1F4F8) return true;
-    if (cp >= 0x1F4F9 && cp <= 0x1F4FC) return true;
-    if (cp >= 0x1F4FF && cp <= 0x1F502) return true;
-    if (cp == 0x1F503) return true;
-    if (cp >= 0x1F504 && cp <= 0x1F507) return true;
-    if (cp == 0x1F508) return true;
-    if (cp == 0x1F509) return true;
-    if (cp >= 0x1F50A && cp <= 0x1F514) return true;
-    if (cp == 0x1F515) return true;
-    if (cp >= 0x1F516 && cp <= 0x1F52B) return true;
-    if (cp >= 0x1F52C && cp <= 0x1F52D) return true;
-    if (cp >= 0x1F52E && cp <= 0x1F53D) return true;
-    if (cp >= 0x1F54B && cp <= 0x1F54E) return true;
-    if (cp >= 0x1F550 && cp <= 0x1F55B) return true;
-    if (cp >= 0x1F55C && cp <= 0x1F567) return true;
-    if (cp == 0x1F57A) return true;
-    if (cp >= 0x1F595 && cp <= 0x1F596) return true;
-    if (cp == 0x1F5A4) return true;
-    if (cp >= 0x1F5FB && cp <= 0x1F5FF) return true;
-    if (cp == 0x1F600) return true;
-    if (cp >= 0x1F601 && cp <= 0x1F606) return true;
-    if (cp >= 0x1F607 && cp <= 0x1F608) return true;
-    if (cp >= 0x1F609 && cp <= 0x1F60D) return true;
-    if (cp == 0x1F60E) return true;
-    if (cp == 0x1F60F) return true;
-    if (cp == 0x1F610) return true;
-    if (cp == 0x1F611) return true;
-    if (cp >= 0x1F612 && cp <= 0x1F614) return true;
-    if (cp == 0x1F615) return true;
-    if (cp == 0x1F616) return true;
-    if (cp == 0x1F617) return true;
-    if (cp == 0x1F618) return true;
-    if (cp == 0x1F619) return true;
-    if (cp == 0x1F61A) return true;
-    if (cp == 0x1F61B) return true;
-    if (cp >= 0x1F61C && cp <= 0x1F61E) return true;
-    if (cp == 0x1F61F) return true;
-    if (cp >= 0x1F620 && cp <= 0x1F625) return true;
-    if (cp >= 0x1F626 && cp <= 0x1F627) return true;
-    if (cp >= 0x1F628 && cp <= 0x1F62B) return true;
-    if (cp == 0x1F62C) return true;
-    if (cp == 0x1F62D) return true;
-    if (cp >= 0x1F62E && cp <= 0x1F62F) return true;
-    if (cp >= 0x1F630 && cp <= 0x1F633) return true;
-    if (cp == 0x1F634) return true;
-    if (cp == 0x1F635) return true;
-    if (cp == 0x1F636) return true;
-    if (cp >= 0x1F637 && cp <= 0x1F640) return true;
-    if (cp >= 0x1F641 && cp <= 0x1F644) return true;
-    if (cp >= 0x1F645 && cp <= 0x1F64F) return true;
-    if (cp == 0x1F680) return true;
-    if (cp >= 0x1F681 && cp <= 0x1F682) return true;
-    if (cp >= 0x1F683 && cp <= 0x1F685) return true;
-    if (cp == 0x1F686) return true;
-    if (cp == 0x1F687) return true;
-    if (cp == 0x1F688) return true;
-    if (cp == 0x1F689) return true;
-    if (cp >= 0x1F68A && cp <= 0x1F68B) return true;
-    if (cp == 0x1F68C) return true;
-    if (cp == 0x1F68D) return true;
-    if (cp == 0x1F68E) return true;
-    if (cp == 0x1F68F) return true;
-    if (cp == 0x1F690) return true;
-    if (cp >= 0x1F691 && cp <= 0x1F693) return true;
-    if (cp == 0x1F694) return true;
-    if (cp == 0x1F695) return true;
-    if (cp == 0x1F696) return true;
-    if (cp == 0x1F697) return true;
-    if (cp == 0x1F698) return true;
-    if (cp >= 0x1F699 && cp <= 0x1F69A) return true;
-    if (cp >= 0x1F69B && cp <= 0x1F6A1) return true;
-    if (cp == 0x1F6A2) return true;
-    if (cp == 0x1F6A3) return true;
-    if (cp >= 0x1F6A4 && cp <= 0x1F6A5) return true;
-    if (cp == 0x1F6A6) return true;
-    if (cp >= 0x1F6A7 && cp <= 0x1F6AD) return true;
-    if (cp >= 0x1F6AE && cp <= 0x1F6B1) return true;
-    if (cp == 0x1F6B2) return true;
-    if (cp >= 0x1F6B3 && cp <= 0x1F6B5) return true;
-    if (cp == 0x1F6B6) return true;
-    if (cp >= 0x1F6B7 && cp <= 0x1F6B8) return true;
-    if (cp >= 0x1F6B9 && cp <= 0x1F6BE) return true;
-    if (cp == 0x1F6BF) return true;
-    if (cp == 0x1F6C0) return true;
-    if (cp >= 0x1F6C1 && cp <= 0x1F6C5) return true;
-    if (cp == 0x1F6CC) return true;
-    if (cp == 0x1F6D0) return true;
-    if (cp >= 0x1F6D1 && cp <= 0x1F6D2) return true;
-    if (cp == 0x1F6D5) return true;
-    if (cp >= 0x1F6D6 && cp <= 0x1F6D7) return true;
-    if (cp >= 0x1F6DD && cp <= 0x1F6DF) return true;
-    if (cp >= 0x1F6EB && cp <= 0x1F6EC) return true;
-    if (cp >= 0x1F6F4 && cp <= 0x1F6F6) return true;
-    if (cp >= 0x1F6F7 && cp <= 0x1F6F8) return true;
-    if (cp == 0x1F6F9) return true;
-    if (cp == 0x1F6FA) return true;
-    if (cp >= 0x1F6FB && cp <= 0x1F6FC) return true;
-    if (cp >= 0x1F7E0 && cp <= 0x1F7EB) return true;
-    if (cp == 0x1F7F0) return true;
-    if (cp == 0x1F90C) return true;
-    if (cp >= 0x1F90D && cp <= 0x1F90F) return true;
-    if (cp >= 0x1F910 && cp <= 0x1F918) return true;
-    if (cp >= 0x1F919 && cp <= 0x1F91E) return true;
-    if (cp == 0x1F91F) return true;
-    if (cp >= 0x1F920 && cp <= 0x1F927) return true;
-    if (cp >= 0x1F928 && cp <= 0x1F92F) return true;
-    if (cp == 0x1F930) return true;
-    if (cp >= 0x1F931 && cp <= 0x1F932) return true;
-    if (cp >= 0x1F933 && cp <= 0x1F93A) return true;
-    if (cp >= 0x1F93C && cp <= 0x1F93E) return true;
-    if (cp == 0x1F93F) return true;
-    if (cp >= 0x1F940 && cp <= 0x1F945) return true;
-    if (cp >= 0x1F947 && cp <= 0x1F94B) return true;
-    if (cp == 0x1F94C) return true;
-    if (cp >= 0x1F94D && cp <= 0x1F94F) return true;
-    if (cp >= 0x1F950 && cp <= 0x1F95E) return true;
-    if (cp >= 0x1F95F && cp <= 0x1F96B) return true;
-    if (cp >= 0x1F96C && cp <= 0x1F970) return true;
-    if (cp == 0x1F971) return true;
-    if (cp == 0x1F972) return true;
-    if (cp >= 0x1F973 && cp <= 0x1F976) return true;
-    if (cp >= 0x1F977 && cp <= 0x1F978) return true;
-    if (cp == 0x1F979) return true;
-    if (cp == 0x1F97A) return true;
-    if (cp == 0x1F97B) return true;
-    if (cp >= 0x1F97C && cp <= 0x1F97F) return true;
-    if (cp >= 0x1F980 && cp <= 0x1F984) return true;
-    if (cp >= 0x1F985 && cp <= 0x1F991) return true;
-    if (cp >= 0x1F992 && cp <= 0x1F997) return true;
-    if (cp >= 0x1F998 && cp <= 0x1F9A2) return true;
-    if (cp >= 0x1F9A3 && cp <= 0x1F9A4) return true;
-    if (cp >= 0x1F9A5 && cp <= 0x1F9AA) return true;
-    if (cp >= 0x1F9AB && cp <= 0x1F9AD) return true;
-    if (cp >= 0x1F9AE && cp <= 0x1F9AF) return true;
-    if (cp >= 0x1F9B0 && cp <= 0x1F9B9) return true;
-    if (cp >= 0x1F9BA && cp <= 0x1F9BF) return true;
-    if (cp == 0x1F9C0) return true;
-    if (cp >= 0x1F9C1 && cp <= 0x1F9C2) return true;
-    if (cp >= 0x1F9C3 && cp <= 0x1F9CA) return true;
-    if (cp == 0x1F9CB) return true;
-    if (cp == 0x1F9CC) return true;
-    if (cp >= 0x1F9CD && cp <= 0x1F9CF) return true;
-    if (cp >= 0x1F9D0 && cp <= 0x1F9E6) return true;
-    if (cp >= 0x1F9E7 && cp <= 0x1F9FF) return true;
-    if (cp >= 0x1FA70 && cp <= 0x1FA73) return true;
-    if (cp == 0x1FA74) return true;
-    if (cp >= 0x1FA78 && cp <= 0x1FA7A) return true;
-    if (cp >= 0x1FA7B && cp <= 0x1FA7C) return true;
-    if (cp >= 0x1FA80 && cp <= 0x1FA82) return true;
-    if (cp >= 0x1FA83 && cp <= 0x1FA86) return true;
-    if (cp >= 0x1FA90 && cp <= 0x1FA95) return true;
-    if (cp >= 0x1FA96 && cp <= 0x1FAA8) return true;
-    if (cp >= 0x1FAA9 && cp <= 0x1FAAC) return true;
-    if (cp >= 0x1FAB0 && cp <= 0x1FAB6) return true;
-    if (cp >= 0x1FAB7 && cp <= 0x1FABA) return true;
-    if (cp >= 0x1FAC0 && cp <= 0x1FAC2) return true;
-    if (cp >= 0x1FAC3 && cp <= 0x1FAC5) return true;
-    if (cp >= 0x1FAD0 && cp <= 0x1FAD6) return true;
-    if (cp >= 0x1FAD7 && cp <= 0x1FAD9) return true;
-    if (cp >= 0x1FAE0 && cp <= 0x1FAE7) return true;
-    if (cp >= 0x1FAF0 && cp <= 0x1FAF6) return true;
+struct CpRange { uint32_t lo, hi; };
+static bool cp_in_ranges(int cp, const CpRange* r, size_t n) {
+    for (size_t i = 0; i < n; ++i) {
+        if (cp < (int)r[i].lo) return false;
+        if (cp <= (int)r[i].hi) return true;
+    }
     return false;
 }
-
-// Emoji: становится emoji с VS16 (U+FE0F), без VS16 — ширина по wcwidth
-static bool is_emoji_codepoint(int cp) {
-    if (cp == 0x0023) return true;
-    if (cp == 0x002A) return true;
-    if (cp >= 0x0030 && cp <= 0x0039) return true;
-    if (cp == 0x00A9) return true;
-    if (cp == 0x00AE) return true;
-    if (cp == 0x203C) return true;
-    if (cp == 0x2049) return true;
-    if (cp == 0x2122) return true;
-    if (cp == 0x2139) return true;
-    if (cp >= 0x2194 && cp <= 0x2199) return true;
-    if (cp >= 0x21A9 && cp <= 0x21AA) return true;
-    if (cp >= 0x231A && cp <= 0x231B) return true;
-    if (cp == 0x2328) return true;
-    if (cp == 0x23CF) return true;
-    if (cp >= 0x23E9 && cp <= 0x23EC) return true;
-    if (cp >= 0x23ED && cp <= 0x23EE) return true;
-    if (cp == 0x23EF) return true;
-    if (cp == 0x23F0) return true;
-    if (cp >= 0x23F1 && cp <= 0x23F2) return true;
-    if (cp == 0x23F3) return true;
-    if (cp >= 0x23F8 && cp <= 0x23FA) return true;
-    if (cp == 0x24C2) return true;
-    if (cp >= 0x25AA && cp <= 0x25AB) return true;
-    if (cp == 0x25B6) return true;
-    if (cp == 0x25C0) return true;
-    if (cp >= 0x25FB && cp <= 0x25FE) return true;
-    if (cp >= 0x2600 && cp <= 0x2601) return true;
-    if (cp >= 0x2602 && cp <= 0x2603) return true;
-    if (cp == 0x2604) return true;
-    if (cp == 0x260E) return true;
-    if (cp == 0x2611) return true;
-    if (cp >= 0x2614 && cp <= 0x2615) return true;
-    if (cp == 0x2618) return true;
-    if (cp == 0x261D) return true;
-    if (cp == 0x2620) return true;
-    if (cp >= 0x2622 && cp <= 0x2623) return true;
-    if (cp == 0x2626) return true;
-    if (cp == 0x262A) return true;
-    if (cp == 0x262E) return true;
-    if (cp == 0x262F) return true;
-    if (cp >= 0x2638 && cp <= 0x2639) return true;
-    if (cp == 0x263A) return true;
-    if (cp == 0x2640) return true;
-    if (cp == 0x2642) return true;
-    if (cp >= 0x2648 && cp <= 0x2653) return true;
-    if (cp == 0x265F) return true;
-    if (cp == 0x2660) return true;
-    if (cp == 0x2663) return true;
-    if (cp >= 0x2665 && cp <= 0x2666) return true;
-    if (cp == 0x2668) return true;
-    if (cp == 0x267B) return true;
-    if (cp == 0x267E) return true;
-    if (cp == 0x267F) return true;
-    if (cp == 0x2692) return true;
-    if (cp == 0x2693) return true;
-    if (cp == 0x2694) return true;
-    if (cp == 0x2695) return true;
-    if (cp >= 0x2696 && cp <= 0x2697) return true;
-    if (cp == 0x2699) return true;
-    if (cp >= 0x269B && cp <= 0x269C) return true;
-    if (cp >= 0x26A0 && cp <= 0x26A1) return true;
-    if (cp == 0x26A7) return true;
-    if (cp >= 0x26AA && cp <= 0x26AB) return true;
-    if (cp >= 0x26B0 && cp <= 0x26B1) return true;
-    if (cp >= 0x26BD && cp <= 0x26BE) return true;
-    if (cp >= 0x26C4 && cp <= 0x26C5) return true;
-    if (cp == 0x26C8) return true;
-    if (cp == 0x26CE) return true;
-    if (cp == 0x26CF) return true;
-    if (cp == 0x26D1) return true;
-    if (cp == 0x26D3) return true;
-    if (cp == 0x26D4) return true;
-    if (cp == 0x26E9) return true;
-    if (cp == 0x26EA) return true;
-    if (cp >= 0x26F0 && cp <= 0x26F1) return true;
-    if (cp >= 0x26F2 && cp <= 0x26F3) return true;
-    if (cp == 0x26F4) return true;
-    if (cp == 0x26F5) return true;
-    if (cp >= 0x26F7 && cp <= 0x26F9) return true;
-    if (cp == 0x26FA) return true;
-    if (cp == 0x26FD) return true;
-    if (cp == 0x2702) return true;
-    if (cp == 0x2705) return true;
-    if (cp >= 0x2708 && cp <= 0x270C) return true;
-    if (cp == 0x270D) return true;
-    if (cp == 0x270F) return true;
-    if (cp == 0x2712) return true;
-    if (cp == 0x2714) return true;
-    if (cp == 0x2716) return true;
-    if (cp == 0x271D) return true;
-    if (cp == 0x2721) return true;
-    if (cp == 0x2728) return true;
-    if (cp >= 0x2733 && cp <= 0x2734) return true;
-    if (cp == 0x2744) return true;
-    if (cp == 0x2747) return true;
-    if (cp == 0x274C) return true;
-    if (cp == 0x274E) return true;
-    if (cp >= 0x2753 && cp <= 0x2755) return true;
-    if (cp == 0x2757) return true;
-    if (cp == 0x2763) return true;
-    if (cp == 0x2764) return true;
-    if (cp >= 0x2795 && cp <= 0x2797) return true;
-    if (cp == 0x27A1) return true;
-    if (cp == 0x27B0) return true;
-    if (cp == 0x27BF) return true;
-    if (cp >= 0x2934 && cp <= 0x2935) return true;
-    if (cp >= 0x2B05 && cp <= 0x2B07) return true;
-    if (cp >= 0x2B1B && cp <= 0x2B1C) return true;
-    if (cp == 0x2B50) return true;
-    if (cp == 0x2B55) return true;
-    if (cp == 0x3030) return true;
-    if (cp == 0x303D) return true;
-    if (cp == 0x3297) return true;
-    if (cp == 0x3299) return true;
-    if (cp == 0x1F004) return true;
-    if (cp == 0x1F0CF) return true;
-    if (cp >= 0x1F170 && cp <= 0x1F171) return true;
-    if (cp >= 0x1F17E && cp <= 0x1F17F) return true;
-    if (cp == 0x1F18E) return true;
-    if (cp >= 0x1F191 && cp <= 0x1F19A) return true;
-    // Regional Indicator обрабатываются отдельно (пары = флаги стран)
-    // if (cp >= 0x1F1E6 && cp <= 0x1F1FF) return true;
-    if (cp >= 0x1F201 && cp <= 0x1F202) return true;
-    if (cp == 0x1F21A) return true;
-    if (cp == 0x1F22F) return true;
-    if (cp >= 0x1F232 && cp <= 0x1F23A) return true;
-    if (cp >= 0x1F250 && cp <= 0x1F251) return true;
-    if (cp >= 0x1F300 && cp <= 0x1F30C) return true;
-    if (cp >= 0x1F30D && cp <= 0x1F30E) return true;
-    if (cp == 0x1F30F) return true;
-    if (cp == 0x1F310) return true;
-    if (cp == 0x1F311) return true;
-    if (cp == 0x1F312) return true;
-    if (cp >= 0x1F313 && cp <= 0x1F315) return true;
-    if (cp >= 0x1F316 && cp <= 0x1F318) return true;
-    if (cp == 0x1F319) return true;
-    if (cp == 0x1F31A) return true;
-    if (cp == 0x1F31B) return true;
-    if (cp == 0x1F31C) return true;
-    if (cp >= 0x1F31D && cp <= 0x1F31E) return true;
-    if (cp >= 0x1F31F && cp <= 0x1F320) return true;
-    if (cp == 0x1F321) return true;
-    if (cp >= 0x1F324 && cp <= 0x1F32C) return true;
-    if (cp >= 0x1F32D && cp <= 0x1F32F) return true;
-    if (cp >= 0x1F330 && cp <= 0x1F331) return true;
-    if (cp >= 0x1F332 && cp <= 0x1F333) return true;
-    if (cp >= 0x1F334 && cp <= 0x1F335) return true;
-    if (cp == 0x1F336) return true;
-    if (cp >= 0x1F337 && cp <= 0x1F34A) return true;
-    if (cp == 0x1F34B) return true;
-    if (cp >= 0x1F34C && cp <= 0x1F34F) return true;
-    if (cp == 0x1F350) return true;
-    if (cp >= 0x1F351 && cp <= 0x1F37B) return true;
-    if (cp == 0x1F37C) return true;
-    if (cp == 0x1F37D) return true;
-    if (cp >= 0x1F37E && cp <= 0x1F37F) return true;
-    if (cp >= 0x1F380 && cp <= 0x1F393) return true;
-    if (cp >= 0x1F396 && cp <= 0x1F397) return true;
-    if (cp >= 0x1F399 && cp <= 0x1F39B) return true;
-    if (cp >= 0x1F39E && cp <= 0x1F39F) return true;
-    if (cp >= 0x1F3A0 && cp <= 0x1F3C4) return true;
-    if (cp == 0x1F3C5) return true;
-    if (cp == 0x1F3C6) return true;
-    if (cp == 0x1F3C7) return true;
-    if (cp == 0x1F3C8) return true;
-    if (cp == 0x1F3C9) return true;
-    if (cp == 0x1F3CA) return true;
-    if (cp >= 0x1F3CB && cp <= 0x1F3CE) return true;
-    if (cp >= 0x1F3CF && cp <= 0x1F3D3) return true;
-    if (cp >= 0x1F3D4 && cp <= 0x1F3DF) return true;
-    if (cp >= 0x1F3E0 && cp <= 0x1F3E3) return true;
-    if (cp == 0x1F3E4) return true;
-    if (cp >= 0x1F3E5 && cp <= 0x1F3F0) return true;
-    if (cp == 0x1F3F3) return true;
-    if (cp == 0x1F3F4) return true;
-    if (cp == 0x1F3F5) return true;
-    if (cp == 0x1F3F7) return true;
-    if (cp >= 0x1F3F8 && cp <= 0x1F407) return true;
-    if (cp == 0x1F408) return true;
-    if (cp >= 0x1F409 && cp <= 0x1F40B) return true;
-    if (cp >= 0x1F40C && cp <= 0x1F40E) return true;
-    if (cp >= 0x1F40F && cp <= 0x1F410) return true;
-    if (cp >= 0x1F411 && cp <= 0x1F412) return true;
-    if (cp == 0x1F413) return true;
-    if (cp == 0x1F414) return true;
-    if (cp == 0x1F415) return true;
-    if (cp == 0x1F416) return true;
-    if (cp >= 0x1F417 && cp <= 0x1F429) return true;
-    if (cp == 0x1F42A) return true;
-    if (cp >= 0x1F42B && cp <= 0x1F43E) return true;
-    if (cp == 0x1F43F) return true;
-    if (cp == 0x1F440) return true;
-    if (cp == 0x1F441) return true;
-    if (cp >= 0x1F442 && cp <= 0x1F464) return true;
-    if (cp == 0x1F465) return true;
-    if (cp >= 0x1F466 && cp <= 0x1F46B) return true;
-    if (cp >= 0x1F46C && cp <= 0x1F46D) return true;
-    if (cp >= 0x1F46E && cp <= 0x1F4AC) return true;
-    if (cp == 0x1F4AD) return true;
-    if (cp >= 0x1F4AE && cp <= 0x1F4B5) return true;
-    if (cp >= 0x1F4B6 && cp <= 0x1F4B7) return true;
-    if (cp >= 0x1F4B8 && cp <= 0x1F4EB) return true;
-    if (cp >= 0x1F4EC && cp <= 0x1F4ED) return true;
-    if (cp == 0x1F4EE) return true;
-    if (cp == 0x1F4EF) return true;
-    if (cp >= 0x1F4F0 && cp <= 0x1F4F4) return true;
-    if (cp == 0x1F4F5) return true;
-    if (cp >= 0x1F4F6 && cp <= 0x1F4F7) return true;
-    if (cp == 0x1F4F8) return true;
-    if (cp >= 0x1F4F9 && cp <= 0x1F4FC) return true;
-    if (cp == 0x1F4FD) return true;
-    if (cp >= 0x1F4FF && cp <= 0x1F502) return true;
-    if (cp == 0x1F503) return true;
-    if (cp >= 0x1F504 && cp <= 0x1F507) return true;
-    if (cp == 0x1F508) return true;
-    if (cp == 0x1F509) return true;
-    if (cp >= 0x1F50A && cp <= 0x1F514) return true;
-    if (cp == 0x1F515) return true;
-    if (cp >= 0x1F516 && cp <= 0x1F52B) return true;
-    if (cp >= 0x1F52C && cp <= 0x1F52D) return true;
-    if (cp >= 0x1F52E && cp <= 0x1F53D) return true;
-    if (cp >= 0x1F549 && cp <= 0x1F54A) return true;
-    if (cp >= 0x1F54B && cp <= 0x1F54E) return true;
-    if (cp >= 0x1F550 && cp <= 0x1F55B) return true;
-    if (cp >= 0x1F55C && cp <= 0x1F567) return true;
-    if (cp >= 0x1F56F && cp <= 0x1F570) return true;
-    if (cp >= 0x1F573 && cp <= 0x1F579) return true;
-    if (cp == 0x1F57A) return true;
-    if (cp == 0x1F587) return true;
-    if (cp >= 0x1F58A && cp <= 0x1F58D) return true;
-    if (cp == 0x1F590) return true;
-    if (cp >= 0x1F595 && cp <= 0x1F596) return true;
-    if (cp == 0x1F5A4) return true;
-    if (cp == 0x1F5A5) return true;
-    if (cp == 0x1F5A8) return true;
-    if (cp >= 0x1F5B1 && cp <= 0x1F5B2) return true;
-    if (cp == 0x1F5BC) return true;
-    if (cp >= 0x1F5C2 && cp <= 0x1F5C4) return true;
-    if (cp >= 0x1F5D1 && cp <= 0x1F5D3) return true;
-    if (cp >= 0x1F5DC && cp <= 0x1F5DE) return true;
-    if (cp == 0x1F5E1) return true;
-    if (cp == 0x1F5E3) return true;
-    if (cp == 0x1F5E8) return true;
-    if (cp == 0x1F5EF) return true;
-    if (cp == 0x1F5F3) return true;
-    if (cp == 0x1F5FA) return true;
-    if (cp >= 0x1F5FB && cp <= 0x1F5FF) return true;
-    if (cp == 0x1F600) return true;
-    if (cp >= 0x1F601 && cp <= 0x1F606) return true;
-    if (cp >= 0x1F607 && cp <= 0x1F608) return true;
-    if (cp >= 0x1F609 && cp <= 0x1F60D) return true;
-    if (cp == 0x1F60E) return true;
-    if (cp == 0x1F60F) return true;
-    if (cp == 0x1F610) return true;
-    if (cp == 0x1F611) return true;
-    if (cp >= 0x1F612 && cp <= 0x1F614) return true;
-    if (cp == 0x1F615) return true;
-    if (cp == 0x1F616) return true;
-    if (cp == 0x1F617) return true;
-    if (cp == 0x1F618) return true;
-    if (cp == 0x1F619) return true;
-    if (cp == 0x1F61A) return true;
-    if (cp == 0x1F61B) return true;
-    if (cp >= 0x1F61C && cp <= 0x1F61E) return true;
-    if (cp == 0x1F61F) return true;
-    if (cp >= 0x1F620 && cp <= 0x1F625) return true;
-    if (cp >= 0x1F626 && cp <= 0x1F627) return true;
-    if (cp >= 0x1F628 && cp <= 0x1F62B) return true;
-    if (cp == 0x1F62C) return true;
-    if (cp == 0x1F62D) return true;
-    if (cp >= 0x1F62E && cp <= 0x1F62F) return true;
-    if (cp >= 0x1F630 && cp <= 0x1F633) return true;
-    if (cp == 0x1F634) return true;
-    if (cp == 0x1F635) return true;
-    if (cp == 0x1F636) return true;
-    if (cp >= 0x1F637 && cp <= 0x1F640) return true;
-    if (cp >= 0x1F641 && cp <= 0x1F644) return true;
-    if (cp >= 0x1F645 && cp <= 0x1F64F) return true;
-    if (cp == 0x1F680) return true;
-    if (cp >= 0x1F681 && cp <= 0x1F682) return true;
-    if (cp >= 0x1F683 && cp <= 0x1F685) return true;
-    if (cp == 0x1F686) return true;
-    if (cp == 0x1F687) return true;
-    if (cp == 0x1F688) return true;
-    if (cp == 0x1F689) return true;
-    if (cp >= 0x1F68A && cp <= 0x1F68B) return true;
-    if (cp == 0x1F68C) return true;
-    if (cp == 0x1F68D) return true;
-    if (cp == 0x1F68E) return true;
-    if (cp == 0x1F68F) return true;
-    if (cp == 0x1F690) return true;
-    if (cp >= 0x1F691 && cp <= 0x1F693) return true;
-    if (cp == 0x1F694) return true;
-    if (cp == 0x1F695) return true;
-    if (cp == 0x1F696) return true;
-    if (cp == 0x1F697) return true;
-    if (cp == 0x1F698) return true;
-    if (cp >= 0x1F699 && cp <= 0x1F69A) return true;
-    if (cp >= 0x1F69B && cp <= 0x1F6A1) return true;
-    if (cp == 0x1F6A2) return true;
-    if (cp == 0x1F6A3) return true;
-    if (cp >= 0x1F6A4 && cp <= 0x1F6A5) return true;
-    if (cp == 0x1F6A6) return true;
-    if (cp >= 0x1F6A7 && cp <= 0x1F6AD) return true;
-    if (cp >= 0x1F6AE && cp <= 0x1F6B1) return true;
-    if (cp == 0x1F6B2) return true;
-    if (cp >= 0x1F6B3 && cp <= 0x1F6B5) return true;
-    if (cp == 0x1F6B6) return true;
-    if (cp >= 0x1F6B7 && cp <= 0x1F6B8) return true;
-    if (cp >= 0x1F6B9 && cp <= 0x1F6BE) return true;
-    if (cp == 0x1F6BF) return true;
-    if (cp == 0x1F6C0) return true;
-    if (cp >= 0x1F6C1 && cp <= 0x1F6C5) return true;
-    if (cp == 0x1F6CB) return true;
-    if (cp == 0x1F6CC) return true;
-    if (cp >= 0x1F6CD && cp <= 0x1F6CF) return true;
-    if (cp == 0x1F6D0) return true;
-    if (cp >= 0x1F6D1 && cp <= 0x1F6D2) return true;
-    if (cp == 0x1F6D5) return true;
-    if (cp >= 0x1F6D6 && cp <= 0x1F6D7) return true;
-    if (cp >= 0x1F6DD && cp <= 0x1F6DF) return true;
-    if (cp >= 0x1F6E0 && cp <= 0x1F6E5) return true;
-    if (cp == 0x1F6E9) return true;
-    if (cp >= 0x1F6EB && cp <= 0x1F6EC) return true;
-    if (cp == 0x1F6F0) return true;
-    if (cp == 0x1F6F3) return true;
-    if (cp >= 0x1F6F4 && cp <= 0x1F6F6) return true;
-    if (cp >= 0x1F6F7 && cp <= 0x1F6F8) return true;
-    if (cp == 0x1F6F9) return true;
-    if (cp == 0x1F6FA) return true;
-    if (cp >= 0x1F6FB && cp <= 0x1F6FC) return true;
-    if (cp >= 0x1F7E0 && cp <= 0x1F7EB) return true;
-    if (cp == 0x1F7F0) return true;
-    if (cp == 0x1F90C) return true;
-    if (cp >= 0x1F90D && cp <= 0x1F90F) return true;
-    if (cp >= 0x1F910 && cp <= 0x1F918) return true;
-    if (cp >= 0x1F919 && cp <= 0x1F91E) return true;
-    if (cp == 0x1F91F) return true;
-    if (cp >= 0x1F920 && cp <= 0x1F927) return true;
-    if (cp >= 0x1F928 && cp <= 0x1F92F) return true;
-    if (cp == 0x1F930) return true;
-    if (cp >= 0x1F931 && cp <= 0x1F932) return true;
-    if (cp >= 0x1F933 && cp <= 0x1F93A) return true;
-    if (cp >= 0x1F93C && cp <= 0x1F93E) return true;
-    if (cp == 0x1F93F) return true;
-    if (cp >= 0x1F940 && cp <= 0x1F945) return true;
-    if (cp >= 0x1F947 && cp <= 0x1F94B) return true;
-    if (cp == 0x1F94C) return true;
-    if (cp >= 0x1F94D && cp <= 0x1F94F) return true;
-    if (cp >= 0x1F950 && cp <= 0x1F95E) return true;
-    if (cp >= 0x1F95F && cp <= 0x1F96B) return true;
-    if (cp >= 0x1F96C && cp <= 0x1F970) return true;
-    if (cp == 0x1F971) return true;
-    if (cp == 0x1F972) return true;
-    if (cp >= 0x1F973 && cp <= 0x1F976) return true;
-    if (cp >= 0x1F977 && cp <= 0x1F978) return true;
-    if (cp == 0x1F979) return true;
-    if (cp == 0x1F97A) return true;
-    if (cp == 0x1F97B) return true;
-    if (cp >= 0x1F97C && cp <= 0x1F97F) return true;
-    if (cp >= 0x1F980 && cp <= 0x1F984) return true;
-    if (cp >= 0x1F985 && cp <= 0x1F991) return true;
-    if (cp >= 0x1F992 && cp <= 0x1F997) return true;
-    if (cp >= 0x1F998 && cp <= 0x1F9A2) return true;
-    if (cp >= 0x1F9A3 && cp <= 0x1F9A4) return true;
-    if (cp >= 0x1F9A5 && cp <= 0x1F9AA) return true;
-    if (cp >= 0x1F9AB && cp <= 0x1F9AD) return true;
-    if (cp >= 0x1F9AE && cp <= 0x1F9AF) return true;
-    if (cp >= 0x1F9B0 && cp <= 0x1F9B9) return true;
-    if (cp >= 0x1F9BA && cp <= 0x1F9BF) return true;
-    if (cp == 0x1F9C0) return true;
-    if (cp >= 0x1F9C1 && cp <= 0x1F9C2) return true;
-    if (cp >= 0x1F9C3 && cp <= 0x1F9CA) return true;
-    if (cp == 0x1F9CB) return true;
-    if (cp == 0x1F9CC) return true;
-    if (cp >= 0x1F9CD && cp <= 0x1F9CF) return true;
-    if (cp >= 0x1F9D0 && cp <= 0x1F9E6) return true;
-    if (cp >= 0x1F9E7 && cp <= 0x1F9FF) return true;
-    if (cp >= 0x1FA70 && cp <= 0x1FA73) return true;
-    if (cp == 0x1FA74) return true;
-    if (cp >= 0x1FA78 && cp <= 0x1FA7A) return true;
-    if (cp >= 0x1FA7B && cp <= 0x1FA7C) return true;
-    if (cp >= 0x1FA80 && cp <= 0x1FA82) return true;
-    if (cp >= 0x1FA83 && cp <= 0x1FA86) return true;
-    if (cp >= 0x1FA90 && cp <= 0x1FA95) return true;
-    if (cp >= 0x1FA96 && cp <= 0x1FAA8) return true;
-    if (cp >= 0x1FAA9 && cp <= 0x1FAAC) return true;
-    if (cp >= 0x1FAB0 && cp <= 0x1FAB6) return true;
-    if (cp >= 0x1FAB7 && cp <= 0x1FABA) return true;
-    if (cp >= 0x1FAC0 && cp <= 0x1FAC2) return true;
-    if (cp >= 0x1FAC3 && cp <= 0x1FAC5) return true;
-    if (cp >= 0x1FAD0 && cp <= 0x1FAD6) return true;
-    if (cp >= 0x1FAD7 && cp <= 0x1FAD9) return true;
-    if (cp >= 0x1FAE0 && cp <= 0x1FAE7) return true;
-    if (cp >= 0x1FAF0 && cp <= 0x1FAF6) return true;
-    return false;
-}
+static const CpRange EMOJI_PRES[] = {
+    {0x231A, 0x231B}, {0x23E9, 0x23EC}, {0x23F0, 0x23F0}, {0x23F3, 0x23F3},
+    {0x25FD, 0x25FE}, {0x2614, 0x2615}, {0x2648, 0x2653}, {0x267F, 0x267F},
+    {0x2693, 0x2693}, {0x26A1, 0x26A1}, {0x26AA, 0x26AB}, {0x26BD, 0x26BE},
+    {0x26C4, 0x26C5}, {0x26CE, 0x26CE}, {0x26D4, 0x26D4}, {0x26EA, 0x26EA},
+    {0x26F2, 0x26F3}, {0x26F5, 0x26F5}, {0x26FA, 0x26FA}, {0x26FD, 0x26FD},
+    {0x2705, 0x2705}, {0x270A, 0x270B}, {0x2728, 0x2728}, {0x274C, 0x274C},
+    {0x274E, 0x274E}, {0x2753, 0x2755}, {0x2757, 0x2757}, {0x2795, 0x2797},
+    {0x27B0, 0x27B0}, {0x27BF, 0x27BF}, {0x2B1B, 0x2B1C}, {0x2B50, 0x2B50},
+    {0x2B55, 0x2B55}, {0x1F004, 0x1F004}, {0x1F0CF, 0x1F0CF}, {0x1F18E, 0x1F18E},
+    {0x1F191, 0x1F19A}, {0x1F1E6, 0x1F1FF}, {0x1F201, 0x1F201}, {0x1F21A, 0x1F21A},
+    {0x1F22F, 0x1F22F}, {0x1F232, 0x1F236}, {0x1F238, 0x1F23A}, {0x1F250, 0x1F251},
+    {0x1F300, 0x1F320}, {0x1F32D, 0x1F335}, {0x1F337, 0x1F37C}, {0x1F37E, 0x1F393},
+    {0x1F3A0, 0x1F3CA}, {0x1F3CF, 0x1F3D3}, {0x1F3E0, 0x1F3F0}, {0x1F3F4, 0x1F3F4},
+    {0x1F3F8, 0x1F43E}, {0x1F440, 0x1F440}, {0x1F442, 0x1F4FC}, {0x1F4FF, 0x1F53D},
+    {0x1F54B, 0x1F54E}, {0x1F550, 0x1F567}, {0x1F57A, 0x1F57A}, {0x1F595, 0x1F596},
+    {0x1F5A4, 0x1F5A4}, {0x1F5FB, 0x1F64F}, {0x1F680, 0x1F6C5}, {0x1F6CC, 0x1F6CC},
+    {0x1F6D0, 0x1F6D2}, {0x1F6D5, 0x1F6D7}, {0x1F6DD, 0x1F6DF}, {0x1F6EB, 0x1F6EC},
+    {0x1F6F4, 0x1F6FC}, {0x1F7E0, 0x1F7EB}, {0x1F7F0, 0x1F7F0}, {0x1F90C, 0x1F93A},
+    {0x1F93C, 0x1F945}, {0x1F947, 0x1F9FF}, {0x1FA70, 0x1FA74}, {0x1FA78, 0x1FA7C},
+    {0x1FA80, 0x1FA86}, {0x1FA90, 0x1FAAC}, {0x1FAB0, 0x1FABA}, {0x1FAC0, 0x1FAC5},
+    {0x1FAD0, 0x1FAD9}, {0x1FAE0, 0x1FAE7}, {0x1FAF0, 0x1FAF6},
+};
+static const CpRange EMOJI_CODE[] = {
+    {0x0023, 0x0023}, {0x002A, 0x002A}, {0x0030, 0x0039}, {0x00A9, 0x00A9},
+    {0x00AE, 0x00AE}, {0x203C, 0x203C}, {0x2049, 0x2049}, {0x2122, 0x2122},
+    {0x2139, 0x2139}, {0x2194, 0x2199}, {0x21A9, 0x21AA}, {0x231A, 0x231B},
+    {0x2328, 0x2328}, {0x23CF, 0x23CF}, {0x23E9, 0x23F3}, {0x23F8, 0x23FA},
+    {0x24C2, 0x24C2}, {0x25AA, 0x25AB}, {0x25B6, 0x25B6}, {0x25C0, 0x25C0},
+    {0x25FB, 0x25FE}, {0x2600, 0x2604}, {0x260E, 0x260E}, {0x2611, 0x2611},
+    {0x2614, 0x2615}, {0x2618, 0x2618}, {0x261D, 0x261D}, {0x2620, 0x2620},
+    {0x2622, 0x2623}, {0x2626, 0x2626}, {0x262A, 0x262A}, {0x262E, 0x262F},
+    {0x2638, 0x263A}, {0x2640, 0x2640}, {0x2642, 0x2642}, {0x2648, 0x2653},
+    {0x265F, 0x2660}, {0x2663, 0x2663}, {0x2665, 0x2666}, {0x2668, 0x2668},
+    {0x267B, 0x267B}, {0x267E, 0x267F}, {0x2692, 0x2697}, {0x2699, 0x2699},
+    {0x269B, 0x269C}, {0x26A0, 0x26A1}, {0x26A7, 0x26A7}, {0x26AA, 0x26AB},
+    {0x26B0, 0x26B1}, {0x26BD, 0x26BE}, {0x26C4, 0x26C5}, {0x26C8, 0x26C8},
+    {0x26CE, 0x26CF}, {0x26D1, 0x26D1}, {0x26D3, 0x26D4}, {0x26E9, 0x26EA},
+    {0x26F0, 0x26F5}, {0x26F7, 0x26FA}, {0x26FD, 0x26FD}, {0x2702, 0x2702},
+    {0x2705, 0x2705}, {0x2708, 0x270D}, {0x270F, 0x270F}, {0x2712, 0x2712},
+    {0x2714, 0x2714}, {0x2716, 0x2716}, {0x271D, 0x271D}, {0x2721, 0x2721},
+    {0x2728, 0x2728}, {0x2733, 0x2734}, {0x2744, 0x2744}, {0x2747, 0x2747},
+    {0x274C, 0x274C}, {0x274E, 0x274E}, {0x2753, 0x2755}, {0x2757, 0x2757},
+    {0x2763, 0x2764}, {0x2795, 0x2797}, {0x27A1, 0x27A1}, {0x27B0, 0x27B0},
+    {0x27BF, 0x27BF}, {0x2934, 0x2935}, {0x2B05, 0x2B07}, {0x2B1B, 0x2B1C},
+    {0x2B50, 0x2B50}, {0x2B55, 0x2B55}, {0x3030, 0x3030}, {0x303D, 0x303D},
+    {0x3297, 0x3297}, {0x3299, 0x3299}, {0x1F004, 0x1F004}, {0x1F0CF, 0x1F0CF},
+    {0x1F170, 0x1F171}, {0x1F17E, 0x1F17F}, {0x1F18E, 0x1F18E}, {0x1F191, 0x1F19A},
+    {0x1F1E6, 0x1F1FF}, {0x1F201, 0x1F202}, {0x1F21A, 0x1F21A}, {0x1F22F, 0x1F22F},
+    {0x1F232, 0x1F23A}, {0x1F250, 0x1F251}, {0x1F300, 0x1F321}, {0x1F324, 0x1F393},
+    {0x1F396, 0x1F397}, {0x1F399, 0x1F39B}, {0x1F39E, 0x1F3F0}, {0x1F3F3, 0x1F3F5},
+    {0x1F3F7, 0x1F4FD}, {0x1F4FF, 0x1F53D}, {0x1F549, 0x1F54E}, {0x1F550, 0x1F567},
+    {0x1F56F, 0x1F570}, {0x1F573, 0x1F57A}, {0x1F587, 0x1F587}, {0x1F58A, 0x1F58D},
+    {0x1F590, 0x1F590}, {0x1F595, 0x1F596}, {0x1F5A4, 0x1F5A5}, {0x1F5A8, 0x1F5A8},
+    {0x1F5B1, 0x1F5B2}, {0x1F5BC, 0x1F5BC}, {0x1F5C2, 0x1F5C4}, {0x1F5D1, 0x1F5D3},
+    {0x1F5DC, 0x1F5DE}, {0x1F5E1, 0x1F5E1}, {0x1F5E3, 0x1F5E3}, {0x1F5E8, 0x1F5E8},
+    {0x1F5EF, 0x1F5EF}, {0x1F5F3, 0x1F5F3}, {0x1F5FA, 0x1F64F}, {0x1F680, 0x1F6C5},
+    {0x1F6CB, 0x1F6D2}, {0x1F6D5, 0x1F6D7}, {0x1F6DD, 0x1F6E5}, {0x1F6E9, 0x1F6E9},
+    {0x1F6EB, 0x1F6EC}, {0x1F6F0, 0x1F6F0}, {0x1F6F3, 0x1F6FC}, {0x1F7E0, 0x1F7EB},
+    {0x1F7F0, 0x1F7F0}, {0x1F90C, 0x1F93A}, {0x1F93C, 0x1F945}, {0x1F947, 0x1F9FF},
+    {0x1FA70, 0x1FA74}, {0x1FA78, 0x1FA7C}, {0x1FA80, 0x1FA86}, {0x1FA90, 0x1FAAC},
+    {0x1FAB0, 0x1FABA}, {0x1FAC0, 0x1FAC5}, {0x1FAD0, 0x1FAD9}, {0x1FAE0, 0x1FAE7},
+    {0x1FAF0, 0x1FAF6},
+};
+static bool is_emoji_presentation(int cp) { return cp_in_ranges(cp, EMOJI_PRES, sizeof(EMOJI_PRES)/sizeof(EMOJI_PRES[0])); }
+static bool is_emoji_codepoint(int cp) { return cp_in_ranges(cp, EMOJI_CODE, sizeof(EMOJI_CODE)/sizeof(EMOJI_CODE[0])); }
 
 static int get_char_width(wchar_t wc) {
     int cp = (int)wc;
@@ -746,7 +148,6 @@ static int get_char_width(wchar_t wc) {
     int w = wcwidth(wc);
     return (w > 0) ? w : 0;
 }
-
 
 // ─────────────────────────── Цвета ───────────────────────────
 #define C_RESET   "\033[0m"
@@ -771,6 +172,7 @@ static int get_char_width(wchar_t wc) {
 // ─────────────────────────── Вспомогательная функция ─────────
 // Заменяет emoji-флаги (пары Regional Indicator) на текстовый код [XX]
 static std::string replace_flags(const std::string &s) {
+    mbtowc(nullptr, nullptr, 0); // Сброс сдвига UTF-8
     std::string result;
     result.reserve(s.size());
     size_t i = 0;
@@ -820,10 +222,12 @@ static std::string get_home_dir() {
 #define DEFAULT_TEMPERATURE 0.7
 #define DEFAULT_MAX_TOKENS  4096
 
-
 static std::string HISTORY_FILE;
 static std::string SYSTEM_PROMPT_FILE;
 static std::string READLINE_HIST_FILE;
+static std::string CONFIG_DIR;
+static std::string CONFIG_FILE;
+static std::string SESSIONS_DIR;
 
 // ─────────────────────────── Глобальное состояние ────────────
 struct ChatSession {
@@ -848,7 +252,6 @@ struct ChatSession {
     //std::string       model          = "qwen/qwen3.6-max-preview";
     //std::string       model          = "anthropic/claude-sonnet-4.6";
 
-
     std::string       sys_prompt;
     double            temperature    = DEFAULT_TEMPERATURE;
     int               max_tokens     = DEFAULT_MAX_TOKENS;
@@ -856,10 +259,27 @@ struct ChatSession {
     int               total_completion_tokens = 0;
     bool              autorun                 = false;
     bool              history_enabled          = false;
-    bool              nores                    = false;
+    bool              nores                    = false; // выкл по умолчанию
+    std::string       session_name             = "default";
+    std::unordered_map<std::string, std::string> aliases;
 };
 
 static ChatSession G;
+
+static const std::vector<std::string> AVAILABLE_MODELS = {
+    "anthropic/claude-opus-4.6",
+    "minimax/minimax-m2.7",
+    "openai/gpt-5.2",
+    "google/gemini-3.1-pro-preview",
+    "x-ai/grok-4",
+    "xiaomi/mimo-v2-flash",
+    "deepseek/deepseek-v4-pro",
+    "anthropic/claude-sonnet-4.6",
+    "xiaomi/mimo-v2-pro",
+    "~google/gemini-pro-latest",
+    "~anthropic/claude-sonnet-latest",
+    "qwen/qwen3.6-max-preview"
+};
 
 // ─────────────────────────── Сигналы ─────────────────────────
 // g_exit_requested: 1 = выход из программы
@@ -875,7 +295,6 @@ static void signal_handler(int /*sig*/) {
         g_stream_abort = 1;
     } else {
         g_exit_requested = 1;
-        rl_done = 1;
     }
 }
 
@@ -1005,7 +424,8 @@ static bool needs_variation_selector(wchar_t cp) {
 }
 
 static size_t visible_width(const std::string &s) {
-    // 1. Убираем ANSI escape-последовательности
+    mbtowc(nullptr, nullptr, 0); // Сброс сдвига UTF-8
+    // 1. Убираем ANSI escape-последовательности (CSI и простые)
     std::string stripped;
     stripped.reserve(s.size());
     size_t i = 0;
@@ -1014,8 +434,10 @@ static size_t visible_width(const std::string &s) {
             ++i;
             if (i < s.size() && s[i] == '[') {
                 ++i;
-                while (i < s.size() && s[i] != 'm') ++i;
+                while (i < s.size() && !((s[i] >= '@' && s[i] <= '~'))) ++i;
                 if (i < s.size()) ++i;
+            } else if (i < s.size()) {
+                ++i;
             }
             continue;
         }
@@ -1100,13 +522,10 @@ static size_t visible_width(const std::string &s) {
     return w;
 }
 
-
-static std::vector<size_t> g_table_col_widths;
-
-static void render_table_row(const std::vector<std::string> &cells, bool is_header = false) {
+static void render_table_row(const std::vector<std::string> &cells, const std::vector<size_t> &col_widths, bool is_header = false) {
     std::cout << C_GRAY << "\xe2\x94\x82" << C_RESET;
     for (size_t i = 0; i < cells.size(); ++i) {
-        size_t col_w = (i < g_table_col_widths.size()) ? g_table_col_widths[i] : 12;
+        size_t col_w = (i < col_widths.size()) ? col_widths[i] : 12;
         std::string rendered = render_inline_md(cells[i]);
         size_t vis_w = visible_width(cells[i]);
         size_t pad = (vis_w < col_w) ? (col_w - vis_w) : 0;
@@ -1118,7 +537,6 @@ static void render_table_row(const std::vector<std::string> &cells, bool is_head
     }
     std::cout << "\n";
 }
-
 
 static void render_markdown(const std::string &text) {
     std::istringstream ss(text);
@@ -1220,6 +638,7 @@ static void render_markdown(const std::string &text) {
         }
 
         // ── Markdown таблицы (двухпроходный рендер) ──
+        std::vector<size_t> table_col_widths;
         if (line.find('|') != std::string::npos) {
             auto first_cells = split_table_cells(replace_flags(line));
             if (first_cells.size() >= 2) {
@@ -1250,18 +669,18 @@ static void render_markdown(const std::string &text) {
                 }
                 size_t max_cols = 0;
                 for (auto &row : table_rows) if (row.size() > max_cols) max_cols = row.size();
-                g_table_col_widths.assign(max_cols, 0);
+                table_col_widths.assign(max_cols, 0);
                 for (size_t ri = 0; ri < table_rows.size(); ++ri) {
                     if (is_sep_row[ri]) continue;
                     for (size_t ci = 0; ci < table_rows[ri].size(); ++ci) {
                         size_t w = visible_width(table_rows[ri][ci]);
-                        if (w > g_table_col_widths[ci]) g_table_col_widths[ci] = w;
+                        if (w > table_col_widths[ci]) table_col_widths[ci] = w;
                     }
                 }
-                for (auto &w : g_table_col_widths) if (w < 3) w = 3;
+                for (auto &w : table_col_widths) if (w < 3) w = 3;
                 std::cout << C_GRAY << "\xe2\x94\x8c";
                 for (size_t ci = 0; ci < max_cols; ++ci) {
-                    for (size_t k = 0; k < g_table_col_widths[ci] + 2; ++k) std::cout << "\xe2\x94\x80";
+                    for (size_t k = 0; k < table_col_widths[ci] + 2; ++k) std::cout << "\xe2\x94\x80";
                     std::cout << ((ci + 1 < max_cols) ? "\xe2\x94\xac" : "\xe2\x94\x90");
                 }
                 std::cout << C_RESET << "\n";
@@ -1270,18 +689,18 @@ static void render_markdown(const std::string &text) {
                     if (is_sep_row[ri]) {
                         std::cout << C_GRAY << "\xe2\x94\x9c";
                         for (size_t ci = 0; ci < max_cols; ++ci) {
-                            for (size_t k = 0; k < g_table_col_widths[ci] + 2; ++k) std::cout << "\xe2\x94\x80";
+                            for (size_t k = 0; k < table_col_widths[ci] + 2; ++k) std::cout << "\xe2\x94\x80";
                             std::cout << ((ci + 1 < max_cols) ? "\xe2\x94\xbc" : "\xe2\x94\xa4");
                         }
                         std::cout << C_RESET << "\n";
                         header_done = true;
                         continue;
                     }
-                    render_table_row(table_rows[ri], !header_done);
+                    render_table_row(table_rows[ri], table_col_widths, !header_done);
                 }
                 std::cout << C_GRAY << "\xe2\x94\x94";
                 for (size_t ci = 0; ci < max_cols; ++ci) {
-                    for (size_t k = 0; k < g_table_col_widths[ci] + 2; ++k) std::cout << "\xe2\x94\x80";
+                    for (size_t k = 0; k < table_col_widths[ci] + 2; ++k) std::cout << "\xe2\x94\x80";
                     std::cout << ((ci + 1 < max_cols) ? "\xe2\x94\xb4" : "\xe2\x94\x98");
                 }
                 std::cout << C_RESET << "\n";
@@ -1304,14 +723,14 @@ static void render_markdown(const std::string &text) {
 }
 
 // ─────────────────────────── История ─────────────────────────
-void save_history() {
+void save_history(bool silent = false) {
     try {
         json j = json::array();
         for (auto &m : G.messages) j.push_back(m);
         std::ofstream f(G.history_file);
         if (f.is_open()) {
             f << j.dump(2, ' ', false, json::error_handler_t::replace);
-            std::cout << C_YELLOW << "[История сохранена: " << G.history_file
+            if (!silent) std::cout << C_YELLOW << "[История сохранена: " << G.history_file
                       << "]" << C_RESET << std::endl;
         } else {
             std::cerr << C_RED << "[Не удалось открыть файл истории для записи]"
@@ -1326,23 +745,24 @@ bool load_history() {
     std::ifstream f(G.history_file);
     if (!f.is_open()) return false;
     try {
-        // Проверка на пустой файл
         std::string content((std::istreambuf_iterator<char>(f)),
                             std::istreambuf_iterator<char>());
         if (content.empty()) return false;
-        
         json j = json::parse(content);
         G.messages.clear();
-        for (auto &m : j) G.messages.push_back(m);
-        if (G.messages.empty() || G.messages[0]["role"] != "system") {
+        if (!j.is_array()) return false;
+        for (auto &m : j) {
+            if (m.is_object()) G.messages.push_back(m);
+        }
+        if (G.messages.empty() || G.messages[0].value("role", "") != "system") {
             G.messages.insert(G.messages.begin(),
                 {{"role", "system"}, {"content", G.sys_prompt}});
         }
         std::cout << C_YELLOW << "[История загружена: " << G.messages.size()
                   << " сообщений]" << C_RESET << std::endl;
         return true;
-    } catch (...) {
-        std::cerr << C_RED << "[Ошибка загрузки истории]" << C_RESET << std::endl;
+    } catch (const std::exception &e) {
+        std::cerr << C_RED << "[Ошибка загрузки истории: " << e.what() << "]" << C_RESET << std::endl;
         return false;
     }
 }
@@ -1430,7 +850,8 @@ std::vector<std::string> parse_bash_blocks(const std::string &content) {
             if (p == std::string::npos) break;
             auto after = p + 3;
             if (after >= content.size() || content[after] == '\n' ||
-                content[after] == '\r'  || content[after] == ' ') {
+                content[after] == '\r'  || content[after] == ' ' ||
+                !std::isalnum((unsigned char)content[after])) {
                 cnt_end = p; break;
             }
             search_from = p + 3;
@@ -1517,126 +938,278 @@ static size_t WriteCallback(void *contents, size_t size, size_t nmemb, void *use
     return size * nmemb;
 }
 
+// ──────────────────── Директории и конфиг ────────────────────
+static void ensure_dir(const std::string& path) { mkdir(path.c_str(), 0755); }
+static void init_paths() {
+    std::string home = get_home_dir();
+    CONFIG_DIR     = home + "/.config/sw_chat";
+    CONFIG_FILE    = CONFIG_DIR + "/config.json";
+    SESSIONS_DIR   = CONFIG_DIR + "/sessions";
+    HISTORY_FILE   = SESSIONS_DIR + "/" + G.session_name + ".json";
+    READLINE_HIST_FILE = CONFIG_DIR + "/.readline_history";
+    ensure_dir(CONFIG_DIR); ensure_dir(SESSIONS_DIR);
+    G.history_file = HISTORY_FILE;
+}
+static void save_config() {
+    try {
+        json j; j["model"]=G.model; j["temperature"]=G.temperature; j["max_tokens"]=G.max_tokens;
+        j["autorun"]=G.autorun; j["history_enabled"]=G.history_enabled; j["nores"]=G.nores;
+    j["aliases"]=G.aliases;
+        std::ofstream f(CONFIG_FILE); if(f.is_open()) f << j.dump(2);
+    } catch(...){}
+}
+static void load_config() {
+    std::ifstream f(CONFIG_FILE); if(!f.is_open()) return;
+    try {
+        std::string c((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        if(c.empty()) return; json j = json::parse(c);
+        if(j.count("model")) G.model=j["model"]; if(j.count("temperature")) G.temperature=j["temperature"];
+        if(j.count("max_tokens")) G.max_tokens=j["max_tokens"]; if(j.count("autorun")) G.autorun=j["autorun"];
+        if(j.count("history_enabled")) G.history_enabled=j["history_enabled"]; if(j.count("nores")) G.nores=j["nores"];
+        if(j.count("aliases")) G.aliases=j["aliases"].get<std::unordered_map<std::string,std::string>>();
+    } catch(...){}
+}
+static void switch_session(const std::string& name) {
+    if(G.history_enabled) save_history(true);
+    G.session_name = name; HISTORY_FILE = SESSIONS_DIR + "/" + name + ".json";
+    G.history_file = HISTORY_FILE; G.messages.clear();
+    G.messages.push_back({{"role","system"},{"content",G.sys_prompt}});
+    load_history(); std::cout << C_GREEN << "[Сессия: " << name << "]" << C_RESET << std::endl;
+}
+static void list_sessions() {
+    DIR* dir = opendir(SESSIONS_DIR.c_str());
+    if(!dir) { std::cout << C_GRAY << "[Нет сессий]" << C_RESET << std::endl; return; }
+    std::cout << C_YELLOW << "[Сессии]:" << C_RESET << std::endl;
+    struct dirent* ent; while((ent=readdir(dir))) {
+        std::string fn=ent->d_name;
+        if(fn.size()>5 && fn.substr(fn.size()-5)==".json") {
+            std::string s=fn.substr(0,fn.size()-5);
+            std::cout << (s==G.session_name?C_GREEN "► ":"  ") << s << C_RESET << std::endl;
+        }
+    } closedir(dir);
+}
+static std::string expand_aliases(const std::string& input) {
+    if(input.empty()||(input[0]!='!'&&input[0]!='/')) return input;
+    std::string key=input.substr(1); size_t sp=key.find(' ');
+    std::string alias=(sp!=std::string::npos)?key.substr(0,sp):key;
+    if(G.aliases.count(alias)) {
+        std::string val=G.aliases[alias];
+        return (sp!=std::string::npos)?val+key.substr(sp):val;
+    } return input;
+}
+static void search_history(const std::string& query) {
+    std::string q=query; std::transform(q.begin(),q.end(),q.begin(),::tolower);
+    bool found=false;
+    for(size_t i=0;i<G.messages.size();++i) {
+        std::string role=G.messages[i]["role"]; std::string cont=G.messages[i]["content"];
+        std::string low=cont; std::transform(low.begin(),low.end(),low.begin(),::tolower);
+        if(low.find(q)!=std::string::npos) {
+            if(cont.size()>150) cont=cont.substr(0,150)+"...";
+            std::cout << C_CYAN << "["<<i<<"] "<<role<<": " << C_RESET << cont << std::endl; found=true;
+        }
+    } if(!found) std::cout << C_GRAY << "[Ничего не найдено]" << C_RESET << std::endl;
+}
+static std::string strip_ansi(const std::string& s) {
+    std::string out; out.reserve(s.size()); size_t i=0;
+    while(i<s.size()) {
+        if(s[i]=='\033'){++i;if(i<s.size()&&s[i]=='['){++i;while(i<s.size()&&!((s[i]>='@'&&s[i]<='~')))++i;if(i<s.size())++i;}else if(i<s.size())++i;continue;}
+        out+=s[i++];
+    } return out;
+}
+static void export_dialog(const std::string& arg) {
+    std::string fmt="md", file="dialog_export.md";
+    size_t sp=arg.find(' '); if(sp!=std::string::npos){fmt=arg.substr(0,sp);file=arg.substr(sp+1);}
+    else if(!arg.empty()){fmt=arg;file="dialog_export."+fmt;}
+    std::ofstream f(file); if(!f.is_open()){std::cerr<<C_RED<<"[Не удалось создать файл]"<<C_RESET<<std::endl;return;}
+    for(auto& m:G.messages){
+        std::string role=m["role"]; std::string cont=m["content"];
+        if(fmt=="json"){f<<m.dump(2)<<",\n";continue;}
+        std::string txt=(fmt=="txt")?strip_ansi(cont):cont;
+        f<<"## "<<role<<"\n"<<txt<<"\n\n";
+    } std::cout << C_GREEN << "[Экспортировано в " << file << "]" << C_RESET << std::endl;
+}
+static void smart_trim_context() {
+    const size_t MAX_CHARS = (G.max_tokens > 0 ? G.max_tokens : 4096) * 3;
+    size_t total = 0;
+    for(auto& m : G.messages) {
+        if (m.count("content") && m["content"].is_string())
+            total += m["content"].get<std::string>().size();
+    }
+    if(total <= MAX_CHARS) return;
+
+    int sys_idx = -1;
+    for(int i=0; i<(int)G.messages.size(); ++i) {
+        if(G.messages[i].count("role") && G.messages[i]["role"] == "system") {
+            sys_idx = i; break;
+        }
+    }
+
+    size_t sys_size = 0;
+    if (sys_idx >= 0 && G.messages[sys_idx].count("content") && G.messages[sys_idx]["content"].is_string()) {
+        sys_size = G.messages[sys_idx]["content"].get<std::string>().size();
+    }
+    
+    size_t budget = (MAX_CHARS > sys_size) ? (MAX_CHARS - sys_size) : 0;
+    size_t tail_size = 0;
+    int split_idx = (int)G.messages.size();
+
+    for (int i = (int)G.messages.size() - 1; i >= 0; --i) {
+        if (i == sys_idx) continue;
+        size_t len = 0;
+        if (G.messages[i].count("content") && G.messages[i]["content"].is_string())
+            len = G.messages[i]["content"].get<std::string>().size();
+        
+        if (tail_size + len > budget) {
+            split_idx = i + 1; 
+            break;
+        }
+        tail_size += len;
+        split_idx = i;
+    }
+
+    int erase_start = (sys_idx >= 0) ? (sys_idx + 1) : 0;
+    if (split_idx > erase_start) {
+        std::cout << C_GRAY << "[Обрезка контекста: удаление сообщений " << erase_start << "-" << split_idx-1 << "]" << C_RESET << std::endl;
+        G.messages.erase(G.messages.begin() + erase_start, G.messages.begin() + split_idx);
+    }
+    std::cout << C_GRAY << "[Контекст оптимизирован: " << G.messages.size() << "]" << C_RESET << std::endl;
+}
+static char** cmd_completion(const char* text, int start, int end) {
+    rl_attempted_completion_over = 1;
+    std::vector<std::string> matches;
+    std::string t(text);
+    static const std::vector<std::string> cmds = {"/help","/save","/load","/clear","/history","/delete","/retry","/tokens","/model","/temp","/maxtokens","/system","/file","/autorun","/nores","/cost","/balance","/update","/about","/exit","/new","/list","/switch","/alias","/search","/export"};
+    
+    try {
+        if (start == 0) {
+            for (const auto& c : cmds) if (c.rfind(t, 0) == 0) matches.push_back(c);
+        } else if (rl_line_buffer && rl_line_buffer[0] == '/' && std::string(rl_line_buffer).rfind("/model ", 0) == 0) {
+            // Проверка доступности моделей
+            if (!AVAILABLE_MODELS.empty()) {
+                for (const auto& m : AVAILABLE_MODELS) if (m.rfind(t, 0) == 0) matches.push_back(m);
+            }
+        }
+    } catch (...) {
+        return nullptr;
+    }
+
+    if (matches.empty()) return nullptr;
+    
+    char** res = (char**)malloc(sizeof(char*) * (matches.size() + 1));
+    if (!res) return nullptr;
+    for (size_t i = 0; i < matches.size(); ++i) res[i] = strdup(matches[i].c_str());
+    res[matches.size()] = nullptr;
+    return res;
+}
+static void update_prompt() {
+    size_t chars=0; for(auto& m:G.messages) { if(m.count("content") && m["content"].is_string()) chars+=m["content"].get<std::string>().size(); }
+    size_t limit=G.max_tokens*3; int pct=std::min(100,(int)((chars*100)/(limit>0?limit:1)));
+    std::string bar="["; for(int i=0;i<10;++i) bar+=(i<pct/10)?"#":".";
+    bar+=std::to_string(pct)+"%] ";
+    // Статический буфер для безопасности readline (избегаем dangling pointer)
+    static char pbuf[256];
+    snprintf(pbuf, sizeof(pbuf), "\001\033[1m\033[32m\002%s> \001\033[0m\002", bar.c_str());
+    rl_set_prompt(pbuf);
+}
+
 std::string do_api_request(bool &aborted) {
     aborted = false;
     std::string api_key = get_api_key();
     if (api_key.empty()) return "";
-
     CURL *curl = curl_easy_init();
     if (!curl) return "";
-
-    trim_messages_if_needed();
+    smart_trim_context();
 
     json jData = {
-        {"model",       G.model},
-        {"messages",    G.messages},
-        {"temperature", G.temperature},
-        {"max_tokens",  G.max_tokens},
-        {"stream",      false}
+        {"model", G.model}, {"messages", G.messages},
+        {"temperature", G.temperature}, {"max_tokens", G.max_tokens},
     };
     std::string jsonData = jData.dump(-1, ' ', false, json::error_handler_t::replace);
-
     struct curl_slist *headers = nullptr;
     headers = curl_slist_append(headers, "Content-Type: application/json");
     std::string auth = "Authorization: Bearer " + api_key;
     headers = curl_slist_append(headers, auth.c_str());
 
-    std::string response_body;
+    struct StreamState { std::string full_content; bool header_cleared; };
+    StreamState state = {"", false};
 
-    // Устанавливаем флаги
-    {
-        std::lock_guard<std::mutex> lock(g_stream_mutex);
-        g_stream_abort = 0;
-        g_in_streaming = 1;
-    }
+    auto write_cb = [](void *contents, size_t size, size_t nmemb, void *userp) -> size_t {
+        if (g_stream_abort) return 0;
+        size_t total = size * nmemb;
+        StreamState* st = static_cast<StreamState*>(userp);
+        if (!st->header_cleared) {
+            st->header_cleared = true;
+            std::cerr << "\r\033[K" << std::flush; 
+        }
+        st->full_content.append((char*)contents, total);
+        return total;
+    };
 
-    // Запускаем спиннер
+    { std::lock_guard<std::mutex> lock(g_stream_mutex); g_stream_abort = 0; g_in_streaming = 1; }
     g_spinner_stop.store(false);
-    g_spinner_active.store(isatty(fileno(stdout)));
-    std::thread spinner_t(spinner_thread_func, G.model);
+    g_spinner_active.store(false); // Spinner disabled
+    // Disabled spinner thread
 
-    curl_easy_setopt(curl, CURLOPT_URL, "https://openrouter.ai/api/v1/chat/completions");
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDS,    jsonData.c_str());
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)jsonData.size());
-    curl_easy_setopt(curl, CURLOPT_HTTPHEADER,    headers);
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA,     &response_body);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT,       420L);
-    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 15L);
-
-    CURLcode res = curl_easy_perform(curl);
-
-    // Останавливаем спиннер
-    g_spinner_stop.store(true);
-    g_spinner_active.store(false);
-    if (spinner_t.joinable()) spinner_t.join();
-
-    {
-        std::lock_guard<std::mutex> lock(g_stream_mutex);
-        g_in_streaming = 0;
+    int retries = 3; long backoff = 2;
+    CURLcode res = CURLE_OK; long http_code = 0;
+    while (retries-- > 0) {
+        state.full_content.clear();
+        curl_easy_setopt(curl, CURLOPT_URL, "https://openrouter.ai/api/v1/chat/completions");
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, jsonData.c_str());
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)jsonData.size());
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, static_cast<size_t(*)(void*,size_t,size_t,void*)>(write_cb));
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &state);
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT, 420L);
+        curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 15L);
+        curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+        curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 1L);
+        std::cerr << "\r\033[K" << C_YELLOW << "Думаю... [" << G.model << "] " << C_RESET << std::flush;
+        res = curl_easy_perform(curl);
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+        bool retryable = (res == CURLE_OPERATION_TIMEDOUT || res == CURLE_COULDNT_CONNECT || (http_code >= 500 && http_code < 600));
+        if (!retryable || retries == 0) break;
+        std::cout << "\r\033[2K" << C_YELLOW << "[Ошибка сети, повтор через " << backoff << "с...]" << C_RESET << std::flush;
+        std::this_thread::sleep_for(std::chrono::seconds(backoff));
+        backoff *= 2;
     }
+    g_spinner_stop.store(true); g_spinner_active.store(false);
+    // Disabled join
+    { std::lock_guard<std::mutex> lock(g_stream_mutex); g_in_streaming = 0; }
 
-    long http_code = 0;
-    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
-    curl_slist_free_all(headers);
-    curl_easy_cleanup(curl);
-
-    // Проверяем прерывание
     bool was_aborted = false;
+    { std::lock_guard<std::mutex> lock(g_stream_mutex); if (g_stream_abort) { was_aborted = true; g_stream_abort = 0; } }
+    if (was_aborted) { aborted = true; std::cout << "\n" << C_YELLOW << "[Запрос прерван]" << C_RESET << std::endl; curl_slist_free_all(headers); curl_easy_cleanup(curl); return ""; }
+    if (res != CURLE_OK) { std::cerr << C_RED << "curl: " << curl_easy_strerror(res) << C_RESET << std::endl; curl_slist_free_all(headers); curl_easy_cleanup(curl); return ""; }
+    if (http_code != 200) { std::cerr << C_RED << "[HTTP " << http_code << "] " << state.full_content.substr(0, 300) << C_RESET << std::endl; curl_slist_free_all(headers); curl_easy_cleanup(curl); return ""; }
+
+    // Streaming removed: always parse full JSON
     {
-        std::lock_guard<std::mutex> lock(g_stream_mutex);
-        if (g_stream_abort) {
-            was_aborted = true;
-            g_stream_abort = 0;
-        }
-    }
-
-    if (was_aborted) {
-        aborted = true;
-        std::cout << "\n" << C_YELLOW << "[Запрос прерван пользователем]" << C_RESET << std::endl;
-        return "";
-    }
-
-    if (res != CURLE_OK) {
-        std::cerr << C_RED << "curl failed: " << curl_easy_strerror(res) << C_RESET << std::endl;
-        return "";
-    }
-
-    if (http_code != 200) {
-        std::cerr << C_RED << "[HTTP " << http_code << "] "
-                  << response_body.substr(0, std::min((size_t)500, response_body.size()))
-                  << C_RESET << std::endl;
-        return "";
-    }
-
-    // Парсим JSON-ответ
-    try {
-        json j = json::parse(response_body);
-        std::string content;
-        if (j.contains("choices") && !j["choices"].empty()) {
-            auto &choice = j["choices"][0];
-            if (choice.contains("message") && choice["message"].contains("content")) {
-                content = choice["message"]["content"];
+        try {
+            json j = json::parse(state.full_content);
+            if (j.count("choices") && !j["choices"].empty()) {
+                auto& choice = j["choices"][0];
+                if (choice.count("message") && choice["message"].count("content"))
+                    state.full_content = choice["message"]["content"].get<std::string>();
             }
-        }
-        if (j.contains("usage")) {
-            int pt = j["usage"].value("prompt_tokens", 0);
-            int ct = j["usage"].value("completion_tokens", 0);
-            G.total_prompt_tokens     += pt;
-            G.total_completion_tokens += ct;
-        }
-        return sanitize_utf8(content);
-    } catch (const std::exception &e) {
-        std::cerr << C_RED << "[Ошибка парсинга ответа: " << e.what() << "]" << C_RESET << std::endl;
-        std::cerr << C_GRAY << response_body.substr(0, 300) << C_RESET << std::endl;
-        return "";
+            if (j.count("usage")) {
+                G.total_prompt_tokens += j["usage"].value("prompt_tokens", 0);
+                G.total_completion_tokens += j["usage"].value("completion_tokens", 0);
+            }
+        } catch (...) {}
     }
+    curl_slist_free_all(headers); curl_easy_cleanup(curl);
+    return sanitize_utf8(state.full_content);
 }
 
 // ─────────────────────────── Обработка ответа ────────────────
 // Выводит ответ красиво, обрабатывает bash-команды
 // aborted — если ответ был прерван, не добавляем его в историю
 void process_response(const std::string &content, bool aborted, size_t msgs_before = 0) {
+    if (content.empty()) return;
+    
+    // При стриминге текст уже выведен в консоль (сырой).
+    // Повторный рендеринг создаст дубликат. Только сохраняем и ищем bash.
     if (content.empty()) return;
 
     if (aborted) {
@@ -1699,12 +1272,19 @@ void process_response(const std::string &content, bool aborted, size_t msgs_befo
     // leftover — текст после последнего bash-блока (не рендерится, ждёт результатов)
     auto render_and_execute = [&](const std::string &text, std::string &leftover) -> std::string {
         leftover = "";
-        auto bbs = find_bash_blocks(text);
+        // Trim trailing whitespace/newlines for rendering and bash detection
+        std::string t = text;
+        while (!t.empty() && (t.back() == '\n' || t.back() == '\r' || t.back() == ' ')) t.pop_back();
+        
+        auto bbs = find_bash_blocks(t);
         if (bbs.empty()) {
-            std::cout << "\n" << C_BOLD << C_CYAN << "[Ассистент]:" << C_RESET << "\n";
-            render_markdown(text);
-            std::cout << std::endl;
-            return "";
+std::cout << "\n" << C_BOLD << C_CYAN << "[Ассистент]:" << C_RESET << "\n";
+
+            render_markdown(t); // Используем обрезанный текст (t), чтобы не было лишних пустых строк
+
+            std::cout << std::endl; // Одна пустая строка перед вводом
+        return "";
+
         }
 
         std::cout << "\n" << C_BOLD << C_CYAN << "[Ассистент]:" << C_RESET << "\n";
@@ -1734,8 +1314,8 @@ void process_response(const std::string &content, bool aborted, size_t msgs_befo
         }
 
         // Текст после последнего блока — НЕ рендерим, сохраняем как leftover
-        if (cur < text.size()) {
-            leftover = text.substr(cur);
+        if (cur < t.size()) {
+            leftover = t.substr(cur);
         }
         std::cout << std::endl;
         return combined_result;
@@ -1778,10 +1358,9 @@ void process_response(const std::string &content, bool aborted, size_t msgs_befo
         std::cout << std::endl;
     }
 
-    // Автосохранение
-    if (G.messages.size() >= 10 && G.messages.size() % 10 == 0) save_history();
+    // Автосохранение: пишем всегда, уведомляем раз в 24 сообщения
+    if (G.history_enabled && G.messages.size() > 2) save_history(G.messages.size() % 24 != 0);
 }
-
 
 // ─────────────────────────── Команды ──────────────────────────
 void cmd_update() {
@@ -1987,7 +1566,7 @@ void cmd_balance() {
 
     try {
         json j = json::parse(response_body);
-        json data = j.contains("data") ? j["data"] : j;
+        json data = j.count("data") ? j["data"] : j;
 
         double total_credits = data.value("total_credits", 0.0);
         double total_usage   = data.value("total_usage", 0.0);
@@ -2002,8 +1581,6 @@ void cmd_balance() {
     }
 }
 
-
-
 // ─────────────────────────── Команда /about ──────────────────
 void cmd_about() {
     std::cout << C_CYAN << C_BOLD << "  === Chat CLI ===" << C_RESET << std::endl;
@@ -2013,9 +1590,20 @@ void cmd_about() {
     std::cout << "  Max tok:  " << C_GREEN << G.max_tokens << C_RESET << std::endl;
     std::cout << "  Autorun:  " << (G.autorun ? C_GREEN "вкл" : C_RED "выкл") << C_RESET << std::endl;
     std::cout << "  History:  " << (G.history_enabled ? C_GREEN "вкл" : C_RED "выкл") << C_RESET << std::endl;
+    std::cout << "  NoRes:    " << (G.nores ? C_RED "вкл" : C_GREEN "выкл") << " (скрытие вывода bash)" << C_RESET << std::endl;
+
     std::cout << "  Msgs:     " << C_GREEN << G.messages.size() << C_RESET << std::endl;
     std::cout << "  Tokens:   " << C_GREEN << G.total_prompt_tokens << C_RESET << " prompt + "
               << C_GREEN << G.total_completion_tokens << C_RESET << " completion" << std::endl;
+    if (G.history_enabled) {
+        std::cout << "  Session:  " << C_GREEN << G.session_name << C_RESET << std::endl;
+    }
+    std::cout << C_YELLOW << "  Paths:" << C_RESET << std::endl;
+    std::cout << "  Config:   " << C_GRAY << CONFIG_FILE << C_RESET << std::endl;
+    std::cout << "  Sessions: " << C_GRAY << SESSIONS_DIR << C_RESET << std::endl;
+    std::cout << "  History:  " << C_GRAY << HISTORY_FILE << C_RESET << std::endl;
+    std::cout << "  Readline: " << C_GRAY << READLINE_HIST_FILE << C_RESET << std::endl;
+    cmd_balance();
 }
 
 // ─────────────────────────── Сигнал / выход ──────────────────
@@ -2041,20 +1629,6 @@ void do_exit() {
 
 // ─────────────────────────── Справка ─────────────────────────
 // ─────────────────────── Список моделей ──────────────────────
-static const std::vector<std::string> AVAILABLE_MODELS = {
-    "anthropic/claude-opus-4.6",
-    "minimax/minimax-m2.7",
-    "openai/gpt-5.2",
-    "google/gemini-3.1-pro-preview",
-    "x-ai/grok-4",
-    "xiaomi/mimo-v2-flash",
-    "deepseek/deepseek-v4-pro",
-    "anthropic/claude-sonnet-4.6",
-    "xiaomi/mimo-v2-pro",
-    "~google/gemini-pro-latest",
-    "~anthropic/claude-sonnet-latest",
-    "qwen/qwen3.6-max-preview"
-};
 
 void cmd_model_select() {
     std::cout << C_YELLOW << "\n╔══════════════════════════════════════════════════╗\n";
@@ -2111,6 +1685,12 @@ void print_help() {
         << "  /balance           — проверить баланс OpenRouter\n"
         << "  /update            — обновление программы\n"
         << "  /about             — информация о программе\n"
+        << "  /new [name]        — создать новую сессию\n"
+        << "  /list              — список сессий\n"
+        << "  /switch <name>     — переключить сессию\n"
+        << "  /alias k=v         — создать/удалить/показать алиасы\n"
+        << "  /search <text>     — поиск по истории\n"
+        << "  /export [fmt] [f]  — экспорт диалога (md/txt/json)\n"
         << "  /help              — эта справка\n"
         << "  /exit              — выход\n"
         << "\nМногострочный ввод:\n"
@@ -2319,6 +1899,8 @@ static bool get_user_input(std::string &out) {
             ? "\n\001\033[1m\033[32m\002> \001\033[0m\002"
             : ("\001\033[32m\002" + std::to_string(line_num) + "> \001\033[0m\002");
 
+        std::cout.flush(); fflush(stdout); // Сброс буферов перед вызовом readline
+        std::cout.flush(); fflush(stdout); // Сброс буферов перед вызовом readline
         char *line = readline(prompt.c_str());
 
         if (!line) {
@@ -2334,7 +1916,7 @@ static bool get_user_input(std::string &out) {
         }
 
         std::string sline = sanitize_utf8(std::string(line));
-        free(line);
+        if (line) free(line);
 
         // "//" — завершение многострочного ввода
         if (sline == "//") {
@@ -2407,6 +1989,12 @@ static std::string command_arg(const std::string &s, const std::string &cmd) {
 int main(int argc, char *argv[]) {
 
 std::setlocale(LC_ALL, "");
+    // std::ios::sync_with_stdio(false); // Отключаем синхронизацию для readline
+    rl_catch_signals = 0;            // Мы сами обрабатываем сигналы
+    rl_catch_sigwinch = 1;           // Readline сам обрабатывает ресайз окна
+    // std::ios::sync_with_stdio(false); // Отключаем синхронизацию для readline
+    rl_catch_signals = 0;            // Мы сами обрабатываем сигналы
+    rl_catch_sigwinch = 1;           // Readline сам обрабатывает ресайз окна
     // Инициализируем пути
     std::string home = get_home_dir();
     HISTORY_FILE       = home + "/tmp/chat_history.json";
@@ -2480,7 +2068,16 @@ std::setlocale(LC_ALL, "");
         }
         G.messages.push_back({{"role", "user"}, {"content", message}});
         bool aborted = false;
-        std::string content = do_api_request(aborted);
+        std::string content;
+        try {
+            content = do_api_request(aborted);
+        } catch (const std::exception& e) {
+            std::cerr << C_RED << "[Ошибка API: " << e.what() << "]" << C_RESET << std::endl;
+            content = "";
+        } catch (...) {
+            std::cerr << C_RED << "[Неизвестная ошибка API]" << C_RESET << std::endl;
+            content = "";
+        }
         if (!content.empty()) {
             std::cout << "\n";
             render_markdown(content);
@@ -2491,6 +2088,9 @@ std::setlocale(LC_ALL, "");
     }
 
     // ── Интерактивный режим ──
+    init_paths();
+    load_config();
+
     std::cout << C_BOLD << C_CYAN << "=== Chat CLI ===" << C_RESET << std::endl;
     std::cout << C_YELLOW << "Модель: " << G.model << C_RESET << std::endl;
     std::cout << C_YELLOW << "Введите /help для справки" << C_RESET << std::endl;
@@ -2503,9 +2103,9 @@ std::setlocale(LC_ALL, "");
     std::cout << C_GRAY   << "Подсказка: пустой Enter — отправить, '//' — отправить, "
                              "Ctrl+C во время ответа — прервать"
               << C_RESET << std::endl;
-
     using_history();
     if (G.history_enabled) read_history(READLINE_HIST_FILE.c_str());
+    rl_attempted_completion_function = cmd_completion;
 
     while (true) {
         if (g_exit_requested) do_exit();
@@ -2515,7 +2115,8 @@ std::setlocale(LC_ALL, "");
 
         if (g_exit_requested) do_exit();
 
-        if (userAnswer.empty()) continue; // пустой ввод — просто игнорируем
+        userAnswer = expand_aliases(userAnswer);
+        if (userAnswer.empty()) continue;
 
         // ── Специальные команды ──
         if (userAnswer == "/help")    { print_help();    continue; }
@@ -2567,6 +2168,41 @@ std::setlocale(LC_ALL, "");
         if (userAnswer == "/balance") { cmd_balance(); continue; }
         if (userAnswer == "/about")   { cmd_about();   continue; }
 
+
+        if (match_command(userAnswer, "/new")) {
+            std::string n = command_arg(userAnswer, "/new");
+            if (n.empty()) n = "session_" + std::to_string(time(0));
+            switch_session(n); continue;
+        }
+        if (userAnswer == "/list") { list_sessions(); continue; }
+        if (match_command(userAnswer, "/switch")) {
+            std::string n = command_arg(userAnswer, "/switch");
+            if (!n.empty()) switch_session(n);
+            else std::cerr << C_RED << "[Укажите имя сессии]" << C_RESET << std::endl;
+            continue;
+        }
+        if (match_command(userAnswer, "/alias")) {
+            std::string arg = command_arg(userAnswer, "/alias");
+            size_t eq = arg.find('=');
+            if (eq != std::string::npos) {
+                G.aliases[arg.substr(0, eq)] = arg.substr(eq+1);
+                std::cout << C_GREEN << "[Алиас сохранён]" << C_RESET << std::endl;
+                save_config();
+            } else if (!arg.empty()) {
+                G.aliases.erase(arg);
+                std::cout << C_YELLOW << "[Алиас удалён]" << C_RESET << std::endl;
+                save_config();
+            } else {
+                for (auto& p : G.aliases) std::cout << C_CYAN << p.first << C_RESET << " = " << p.second << std::endl;
+            }
+            continue;
+        }
+        if (match_command(userAnswer, "/search")) {
+            search_history(command_arg(userAnswer, "/search")); continue;
+        }
+        if (match_command(userAnswer, "/export")) {
+            export_dialog(command_arg(userAnswer, "/export")); continue;
+        }
         if (userAnswer == "/exit")    { do_exit(); }
         if (userAnswer == "/system")  {
             std::cout << C_MAGENTA << "[Системный промпт]:\n"
@@ -2691,11 +2327,22 @@ std::setlocale(LC_ALL, "");
         // ── API запрос ──
         size_t msgs_before = G.messages.size() - 1;
         bool aborted = false;
-        std::string content = do_api_request(aborted);
+        std::string content;
+        try {
+            content = do_api_request(aborted);
+        } catch (const std::exception& e) {
+            std::cerr << C_RED << "[Ошибка API: " << e.what() << "]" << C_RESET << std::endl;
+            content = "";
+        } catch (...) {
+            std::cerr << C_RED << "[Неизвестная ошибка API]" << C_RESET << std::endl;
+            content = "";
+        }
 
         if (g_exit_requested) do_exit();
 
         process_response(content, aborted, msgs_before);
+        if (G.history_enabled) save_history(true);
+        update_prompt();
     }
 
     curl_global_cleanup();
