@@ -25,7 +25,7 @@
 
 using json = nlohmann::json;
 // ─────────────────────────── Версия ───────────────────────────
-#define APP_VERSION "1.0.11"
+#define APP_VERSION "1.0.12"
 
 // Emoji codepoints где glibc wcwidth() неправильно возвращает 1
 static std::unordered_set<int> KNOWN_WIDE_EMOJI = {
@@ -1617,6 +1617,7 @@ void do_exit() {
         std::this_thread::sleep_for(std::chrono::milliseconds(150));
     }
     
+    save_config();
     if (G.history_enabled) {
         std::cout << "\n" << C_YELLOW << "[Сохраняю историю...]" << C_RESET << std::endl;
         save_history();
