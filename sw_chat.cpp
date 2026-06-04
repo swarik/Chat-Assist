@@ -25,45 +25,8 @@
 
 using json = nlohmann::json;
 // ─────────────────────────── Версия ───────────────────────────
-#define APP_VERSION "1.0.15"
+#define APP_VERSION "1.0.20"
 
-// Emoji codepoints где glibc wcwidth() неправильно возвращает 1
-static std::unordered_set<int> KNOWN_WIDE_EMOJI = {
-    0x1F300, 0x1F301, 0x1F302, 0x1F303, 0x1F304, 0x1F305, 0x1F306, 0x1F307,
-    0x1F308, 0x1F309, 0x1F30A, 0x1F30B, 0x1F30C, 0x1F30D, 0x1F30E, 0x1F30F,
-    0x1F310, 0x1F311, 0x1F312, 0x1F313, 0x1F314, 0x1F315, 0x1F316, 0x1F317,
-    0x1F318, 0x1F319, 0x1F31A, 0x1F31B, 0x1F31C, 0x1F31D, 0x1F31E, 0x1F31F,
-    0x1F320, 0x1F321, 0x1F322, 0x1F323, 0x1F324, 0x1F325, 0x1F326, 0x1F327,
-    0x1F328, 0x1F329, 0x1F32A, 0x1F32B, 0x1F32C,
-    0x1F4A0, 0x1F4A1, 0x1F4A2, 0x1F4A3, 0x1F4A4, 0x1F4A5, 0x1F4A6, 0x1F4A7,
-    0x1F4A8, 0x1F4A9, 0x1F4AA, 0x1F4AB, 0x1F4AC, 0x1F4AD, 0x1F4AE, 0x1F4AF,
-    0x1F525, 0x1F31F, 0x1F389, 0x1F38A, 0x1F3C6,
-    0x1F3CB, 0x1F3CC, 0x1F3CD, 0x1F3CE, 0x1F3CF, 0x1F3D0, 0x1F3D1, 0x1F3D2,
-    0x1F3D3, 0x1F3D4, 0x1F3D5, 0x1F3D6, 0x1F3D7, 0x1F3D8, 0x1F3D9, 0x1F3DA,
-    0x1F3DB, 0x1F3DC, 0x1F3DD, 0x1F3DE, 0x1F3DF, 0x1F3E0, 0x1F3E1, 0x1F3E2,
-    0x1F3E3, 0x1F3E4, 0x1F3E5, 0x1F3E6, 0x1F3E7, 0x1F3E8, 0x1F3E9, 0x1F3EA,
-    0x1F3EB, 0x1F3EC, 0x1F3ED, 0x1F3EE, 0x1F3EF, 0x1F3F0,
-    0x1F400, 0x1F401, 0x1F402, 0x1F403, 0x1F404, 0x1F405, 0x1F406, 0x1F407,
-    0x1F408, 0x1F409, 0x1F40A, 0x1F40B, 0x1F40C, 0x1F40D, 0x1F40E, 0x1F40F,
-    0x1F410, 0x1F411, 0x1F412, 0x1F413, 0x1F414, 0x1F415, 0x1F416, 0x1F417,
-    0x1F418, 0x1F419, 0x1F41A, 0x1F41B, 0x1F41C, 0x1F41D, 0x1F41E, 0x1F41F,
-    0x1F420, 0x1F421, 0x1F422, 0x1F423, 0x1F424, 0x1F425, 0x1F426, 0x1F427,
-    0x1F428, 0x1F429, 0x1F42A, 0x1F42B, 0x1F42C, 0x1F42D, 0x1F42E, 0x1F42F,
-    0x1F430, 0x1F431, 0x1F432, 0x1F433, 0x1F434, 0x1F435, 0x1F436, 0x1F437,
-    0x1F438, 0x1F439, 0x1F43A, 0x1F43B, 0x1F43C, 0x1F43D, 0x1F43E, 0x1F43F,
-    0x1F440, 0x1F441, 0x1F442, 0x1F443, 0x1F444, 0x1F445, 0x1F446, 0x1F447,
-    0x1F448, 0x1F449, 0x1F44A, 0x1F44B, 0x1F44C, 0x1F44D, 0x1F44E, 0x1F44F,
-    0x1F450, 0x1F451, 0x1F452, 0x1F453, 0x1F454, 0x1F455, 0x1F456, 0x1F457,
-    0x1F458, 0x1F459, 0x1F45A, 0x1F45B, 0x1F45C, 0x1F45D, 0x1F45E, 0x1F45F,
-    0x1F460, 0x1F461, 0x1F462, 0x1F463, 0x1F464, 0x1F465, 0x1F466, 0x1F467,
-    0x1F468, 0x1F469, 0x1F46A, 0x1F46B, 0x1F46C, 0x1F46D, 0x1F46E, 0x1F46F,
-    0x1F470, 0x1F471, 0x1F472, 0x1F473, 0x1F474, 0x1F475, 0x1F476, 0x1F477,
-    0x1F478, 0x1F479, 0x1F47A, 0x1F47B, 0x1F47C, 0x1F47D, 0x1F47E, 0x1F47F,
-    0x1F480, 0x1F481, 0x1F482, 0x1F483, 0x1F484, 0x1F485, 0x1F486, 0x1F487,
-    0x1F488, 0x1F489, 0x1F48A, 0x1F48B, 0x1F48C, 0x1F48D, 0x1F48E, 0x1F48F,
-    0x1F490, 0x1F491, 0x1F492, 0x1F493, 0x1F494, 0x1F495, 0x1F496, 0x1F497,
-    0x1F498, 0x1F499, 0x1F49A, 0x1F49B, 0x1F49C, 0x1F49D, 0x1F49E, 0x1F49F,
-};
 
 // Emoji_Presentation: всегда отображается как emoji (ширина 2)
 struct CpRange { uint32_t lo, hi; };
@@ -415,15 +378,6 @@ static std::vector<std::string> split_table_cells(const std::string &line) {
 // Фильтрует zero-width и combining символы (U+FE0F, U+200D и т.д.)
 // Визуальная ширина UTF-8 строки (без ANSI escape)
 // Проверка: является ли codepoint emoji (требует VS для отображения как emoji)
-static bool needs_variation_selector(wchar_t cp) {
-    // Символы, которые по умолчанию text, но становятся emoji с FE0F
-    // Misc symbols и дингбаты
-    if ((cp >= 0x2600 && cp <= 0x26FF) ||   // Miscellaneous Symbols
-        (cp >= 0x2700 && cp <= 0x27BF))      // Dingbats
-        return true;
-    return false;
-}
-
 static size_t visible_width(const std::string &s) {
     mbtowc(nullptr, nullptr, 0); // Сброс сдвига UTF-8
     // 1. Убираем ANSI escape-последовательности (CSI и простые)
@@ -528,7 +482,7 @@ static void render_table_row(const std::vector<std::string> &cells, const std::v
     for (size_t i = 0; i < cells.size(); ++i) {
         size_t col_w = (i < col_widths.size()) ? col_widths[i] : 12;
         std::string rendered = render_inline_md(cells[i]);
-        size_t vis_w = visible_width(cells[i]);
+        size_t vis_w = visible_width(rendered);
         size_t pad = (vis_w < col_w) ? (col_w - vis_w) : 0;
         if (is_header)
             std::cout << " " << C_BOLD << rendered << C_RESET << std::string(pad, ' ') << " ";
@@ -674,7 +628,7 @@ static void render_markdown(const std::string &text) {
                 for (size_t ri = 0; ri < table_rows.size(); ++ri) {
                     if (is_sep_row[ri]) continue;
                     for (size_t ci = 0; ci < table_rows[ri].size(); ++ci) {
-                        size_t w = visible_width(table_rows[ri][ci]);
+                        size_t w = visible_width(render_inline_md(table_rows[ri][ci]));
                         if (w > table_col_widths[ci]) table_col_widths[ci] = w;
                     }
                 }
@@ -835,36 +789,6 @@ std::string exec_with_timeout(const std::string& cmd, int timeout_sec) {
     return result;
 }
 
-// ─────────────────────────── Парсинг bash-команды ────────────
-// Парсит все ```bash блоки из ответа
-std::vector<std::string> parse_bash_blocks(const std::string &content) {
-    std::vector<std::string> blocks;
-    const std::string open_tag = "```bash";
-    std::string::size_type pos = 0;
-    while (pos < content.size()) {
-        auto cnt_start = content.find(open_tag, pos);
-        if (cnt_start == std::string::npos) break;
-        auto search_from = cnt_start + open_tag.size();
-        std::string::size_type cnt_end = std::string::npos;
-        while (search_from < content.size()) {
-            auto p = content.find("```", search_from);
-            if (p == std::string::npos) break;
-            auto after = p + 3;
-            if (after >= content.size() || content[after] == '\n' ||
-                content[after] == '\r'  || content[after] == ' ' ||
-                !std::isalnum((unsigned char)content[after])) {
-                cnt_end = p; break;
-            }
-            search_from = p + 3;
-        }
-        if (cnt_end == std::string::npos) break;
-        blocks.push_back(content.substr(cnt_start + open_tag.size(),
-                                        cnt_end - (cnt_start + open_tag.size())));
-        pos = cnt_end + 3;
-    }
-    return blocks;
-}
-
 // Выполняет один bash-блок с подтверждением
 // local_autorun — локальный флаг "запустить все блоки текущего пакета" (не трогает G.autorun)
 std::string execute_single_bash(const std::string &bash_code, int idx, int total, bool &local_autorun) {
@@ -892,40 +816,42 @@ std::string execute_single_bash(const std::string &bash_code, int idx, int total
     return result;
 }
 
-// Обёртка совместимости
-std::string execute_bash_blocks(const std::string &content) {
-    auto blocks = parse_bash_blocks(content);
-    if (blocks.empty()) return "";
-    std::string combined;
-    int total = (int)blocks.size();
-    bool local_autorun = false;
-    for (int idx = 0; idx < total; ++idx) {
-        std::string result = execute_single_bash(blocks[idx], idx, total, local_autorun);
-        if (!result.empty()) {
-            if (!combined.empty()) combined += "\n---\n";
-            if (total > 1) combined += "[Блок " + std::to_string(idx+1) + "]:\n";
-            combined += result;
-        }
-    }
-    return combined;
-}
 
 // ─────────────────────────── Спиннер ─────────────────────────
-static std::atomic<bool> g_spinner_active{false};
-static std::atomic<bool> g_spinner_stop{false}; // атомарный флаг остановки спиннера (БАГ 9)
+// Thread-safe: поток спиннера пишет ТОЛЬКО в stderr через write() (async-safe),
+// основной поток во время curl_easy_perform в stdout/stderr не пишет.
+static std::atomic<bool> g_spinner_run{false};
 
-static void spinner_thread_func(const std::string &model) {
-    const char* frames[] = {"⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"};
+static void spinner_loop(std::string model) {
+    static const char* frames[] = {
+        "\xe2\xa0\x8b","\xe2\xa0\x99","\xe2\xa0\xb9","\xe2\xa0\xb8",
+        "\xe2\xa0\xbc","\xe2\xa0\xb4","\xe2\xa0\xa6","\xe2\xa0\xa7",
+        "\xe2\xa0\x87","\xe2\xa0\x8f"
+    };
     int idx = 0;
-    while (g_spinner_active.load() && !g_spinner_stop.load()) {
-        std::cout << "\r" << C_YELLOW << frames[idx % 10]
-                  << " Думаю... [" << model << "]  "
-                  << C_RESET << std::flush;
+    while (g_spinner_run.load(std::memory_order_relaxed)) {
+        std::string line = std::string("\r") + C_CYAN + frames[idx % 10] +
+                           C_RESET + C_GRAY + " размышляю " + C_YELLOW +
+                           "[" + model + "]" + C_RESET + "\033[K";
+        ssize_t r = ::write(STDERR_FILENO, line.data(), line.size());
+        (void)r;
         idx++;
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        std::this_thread::sleep_for(std::chrono::milliseconds(90));
     }
-    // Стираем строку спиннера
-    std::cout << "\r\033[2K" << std::flush;
+    const char* clr = "\r\033[K";
+    ssize_t r = ::write(STDERR_FILENO, clr, 5); (void)r;
+}
+
+static std::thread g_spinner_thread;
+static void spinner_start(const std::string &model) {
+    if (g_spinner_run.load()) return;
+    g_spinner_run.store(true);
+    g_spinner_thread = std::thread(spinner_loop, model);
+}
+static void spinner_stop() {
+    if (!g_spinner_run.load()) return;
+    g_spinner_run.store(false);
+    if (g_spinner_thread.joinable()) g_spinner_thread.join();
 }
 
 // ─────────────────────────── API запрос ──────────────────────
@@ -1102,15 +1028,41 @@ static char** cmd_completion(const char* text, int start, int end) {
     res[matches.size()] = nullptr;
     return res;
 }
-static void update_prompt() {
-    size_t chars=0; for(auto& m:G.messages) { if(m.count("content") && m["content"].is_string()) chars+=m["content"].get<std::string>().size(); }
-    size_t limit=G.max_tokens*3; int pct=std::min(100,(int)((chars*100)/(limit>0?limit:1)));
-    std::string bar="["; for(int i=0;i<10;++i) bar+=(i<pct/10)?"#":".";
-    bar+=std::to_string(pct)+"%] ";
-    // Статический буфер для безопасности readline (избегаем dangling pointer)
-    static char pbuf[256];
-    snprintf(pbuf, sizeof(pbuf), "\001\033[1m\033[32m\002%s> \001\033[0m\002", bar.c_str());
-    rl_set_prompt(pbuf);
+// Индикатор заполнения контекста: цветной бар [██████░░░░] NN% + число сообщений.
+// Возвращает готовую строку-промпт с \001..\002 (невидимая для readline разметка).
+static std::string build_prompt() {
+    size_t chars = 0;
+    int msgs = 0;
+    for (auto& m : G.messages) {
+        if (m.count("content") && m["content"].is_string())
+            chars += m["content"].get<std::string>().size();
+        ++msgs;
+    }
+    size_t limit = (size_t)(G.max_tokens > 0 ? G.max_tokens : 4096) * 3;
+    int pct = (int)std::min<size_t>(100, (chars * 100) / (limit > 0 ? limit : 1));
+
+    // Цвет по заполнению: зелёный < 50 < жёлтый < 80 < красный
+    const char* col = (pct < 50) ? "\033[32m" : (pct < 80) ? "\033[33m" : "\033[31m";
+
+    const int W = 10;
+    int filled = (pct * W + 50) / 100;          // округление
+    std::string bar;
+    for (int i = 0; i < W; ++i)
+        bar += (i < filled) ? "\xe2\x96\x88"   // █ full block
+                            : "\xe2\x96\x91";   // ░ light shade
+
+    // \001..\002 — обёртки невидимых символов для корректного подсчёта длины readline
+    char pct_s[8]; snprintf(pct_s, sizeof(pct_s), "%d", pct);
+    std::string p;
+    p += "\n";
+    p += "\001"; p += C_GRAY;   p += "\002"; p += "\xe2\x94\x82 ";          // │
+    p += "\001"; p += col;      p += "\002"; p += bar;
+    p += "\001"; p += C_GRAY;   p += "\002"; p += " " + std::string(pct_s) + "%";
+    p += " \xc2\xb7 " + std::to_string(msgs) + " msg";
+    p += "\001"; p += C_RESET;  p += "\002"; p += "\n";
+    p += "\001"; p += C_BOLD;   p += C_GREEN; p += "\002"; p += "\xe2\x9d\xaf "; // ❯
+    p += "\001"; p += C_RESET;  p += "\002";
+    return p;
 }
 
 std::string do_api_request(bool &aborted) {
@@ -1140,16 +1092,13 @@ std::string do_api_request(bool &aborted) {
         StreamState* st = static_cast<StreamState*>(userp);
         if (!st->header_cleared) {
             st->header_cleared = true;
-            std::cerr << "\r\033[K" << std::flush; 
+            spinner_stop();
         }
         st->full_content.append((char*)contents, total);
         return total;
     };
 
     { std::lock_guard<std::mutex> lock(g_stream_mutex); g_stream_abort = 0; g_in_streaming = 1; }
-    g_spinner_stop.store(false);
-    g_spinner_active.store(false); // Spinner disabled
-    // Disabled spinner thread
 
     int retries = 3; long backoff = 2;
     CURLcode res = CURLE_OK; long http_code = 0;
@@ -1165,8 +1114,9 @@ std::string do_api_request(bool &aborted) {
         curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 15L);
         curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
         curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 1L);
-        std::cerr << "\r\033[K" << C_YELLOW << "Думаю... [" << G.model << "] " << C_RESET << std::flush;
+        spinner_start(G.model);
         res = curl_easy_perform(curl);
+        spinner_stop();
         curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
         bool retryable = (res == CURLE_OPERATION_TIMEDOUT || res == CURLE_COULDNT_CONNECT || (http_code >= 500 && http_code < 600));
         if (!retryable || retries == 0) break;
@@ -1174,8 +1124,7 @@ std::string do_api_request(bool &aborted) {
         std::this_thread::sleep_for(std::chrono::seconds(backoff));
         backoff *= 2;
     }
-    g_spinner_stop.store(true); g_spinner_active.store(false);
-    // Disabled join
+    spinner_stop();
     { std::lock_guard<std::mutex> lock(g_stream_mutex); g_in_streaming = 0; }
 
     bool was_aborted = false;
@@ -1207,10 +1156,6 @@ std::string do_api_request(bool &aborted) {
 // Выводит ответ красиво, обрабатывает bash-команды
 // aborted — если ответ был прерван, не добавляем его в историю
 void process_response(const std::string &content, bool aborted, size_t msgs_before = 0) {
-    if (content.empty()) return;
-    
-    // При стриминге текст уже выведен в консоль (сырой).
-    // Повторный рендеринг создаст дубликат. Только сохраняем и ищем bash.
     if (content.empty()) return;
 
     if (aborted) {
@@ -1611,12 +1556,7 @@ void cmd_about() {
 void do_exit() {
     g_exit_requested = 1;
     
-    // Останавливаем спиннер если он активен
-    if (g_spinner_active.load()) {
-        g_spinner_stop.store(true);
-        g_spinner_active.store(false);
-        std::this_thread::sleep_for(std::chrono::milliseconds(150));
-    }
+    spinner_stop();
     
     save_config();
     if (G.history_enabled) {
@@ -1898,11 +1838,10 @@ static bool get_user_input(std::string &out) {
         if (g_exit_requested) return false;
 
         std::string prompt = first_line
-            ? "\n\001\033[1m\033[32m\002> \001\033[0m\002"
-            : ("\001\033[32m\002" + std::to_string(line_num) + "> \001\033[0m\002");
+            ? build_prompt()
+            : ("\001" C_GREEN "\002" + std::to_string(line_num) + "\xe2\x80\xa6 \001" C_RESET "\002");
 
-        std::cout.flush(); fflush(stdout); // Сброс буферов перед вызовом readline
-        std::cout.flush(); fflush(stdout); // Сброс буферов перед вызовом readline
+        std::cout.flush(); fflush(stdout); // Сброс буферов перед readline
         char *line = readline(prompt.c_str());
 
         if (!line) {
@@ -1991,12 +1930,8 @@ static std::string command_arg(const std::string &s, const std::string &cmd) {
 int main(int argc, char *argv[]) {
 
 std::setlocale(LC_ALL, "");
-    // std::ios::sync_with_stdio(false); // Отключаем синхронизацию для readline
-    rl_catch_signals = 0;            // Мы сами обрабатываем сигналы
-    rl_catch_sigwinch = 1;           // Readline сам обрабатывает ресайз окна
-    // std::ios::sync_with_stdio(false); // Отключаем синхронизацию для readline
-    rl_catch_signals = 0;            // Мы сами обрабатываем сигналы
-    rl_catch_sigwinch = 1;           // Readline сам обрабатывает ресайз окна
+    rl_catch_signals  = 0;   // Мы сами обрабатываем сигналы
+    rl_catch_sigwinch = 1;   // Readline сам обрабатывает ресайз окна
     // Инициализируем пути
     std::string home = get_home_dir();
     HISTORY_FILE       = home + "/tmp/chat_history.json";
@@ -2344,7 +2279,6 @@ std::setlocale(LC_ALL, "");
 
         process_response(content, aborted, msgs_before);
         if (G.history_enabled) save_history(true);
-        update_prompt();
     }
 
     curl_global_cleanup();
