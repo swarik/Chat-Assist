@@ -25,7 +25,7 @@
 
 using json = nlohmann::json;
 // ─────────────────────────── Версия ───────────────────────────
-#define APP_VERSION "1.0.12"
+#define APP_VERSION "1.0.14"
 
 // Emoji codepoints где glibc wcwidth() неправильно возвращает 1
 static std::unordered_set<int> KNOWN_WIDE_EMOJI = {
@@ -267,9 +267,8 @@ struct ChatSession {
 static ChatSession G;
 
 static const std::vector<std::string> AVAILABLE_MODELS = {
-    "anthropic/claude-opus-4.6",
-    "anthropic/claude-opus-4.7",
     "anthropic/claude-opus-4.8",
+    "anthropic/claude-opus-4.7",
     "minimax/minimax-m2.7",
     "openai/gpt-5.2",
     "google/gemini-3.1-pro-preview",
@@ -1619,6 +1618,7 @@ void do_exit() {
         std::this_thread::sleep_for(std::chrono::milliseconds(150));
     }
     
+    save_config();
     if (G.history_enabled) {
         std::cout << "\n" << C_YELLOW << "[Сохраняю историю...]" << C_RESET << std::endl;
         save_history();
@@ -1825,8 +1825,6 @@ struct ModelPricing {
 };
 
 static const ModelPricing KNOWN_PRICING[] = {
-    {"anthropic/claude-opus-4.6",       5.0,   25.0},
-    {"anthropic/claude-opus-4.7",       5.0,   25.0},
     {"anthropic/claude-opus-4.8",       5.0,   25.0},
     {"anthropic/claude-sonnet-4.6",     3.0,   15.0},
     {"anthropic/claude-haiku",          1.0,    5.0},
