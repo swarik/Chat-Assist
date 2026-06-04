@@ -1,6 +1,6 @@
-# Игнорировать всё кроме нужных файлов
 *
-!.gitignore
 !sw_chat.cpp
-!install.sh
+!.gitignore
 !README.md
+!LICENSE
+!install.sh
