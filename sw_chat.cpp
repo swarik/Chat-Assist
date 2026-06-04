@@ -25,7 +25,7 @@
 
 using json = nlohmann::json;
 // ─────────────────────────── Версия ───────────────────────────
-#define APP_VERSION "1.0.14"
+#define APP_VERSION "1.0.15"
 
 // Emoji codepoints где glibc wcwidth() неправильно возвращает 1
 static std::unordered_set<int> KNOWN_WIDE_EMOJI = {
