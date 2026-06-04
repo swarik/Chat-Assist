@@ -25,7 +25,7 @@
 
 using json = nlohmann::json;
 // ─────────────────────────── Версия ───────────────────────────
-#define APP_VERSION "1.0.11"
+#define APP_VERSION "1.0.12"
 
 // Emoji codepoints где glibc wcwidth() неправильно возвращает 1
 static std::unordered_set<int> KNOWN_WIDE_EMOJI = {
@@ -246,11 +246,11 @@ struct ChatSession {
     //std::string       model          = "xiaomi/mimo-v2-flash";
     //std::string       model          = "xiaomi/mimo-v2-pro"
      std::string       model          = "deepseek/deepseek-v4-pro";
-    //std::string       model          = "anthropic/claude-opus-4.6";
+    //std::string       model          = "anthropic/claude-opus-4.8";
     //std::string       model          = "~google/gemini-pro-latest";
     //std::string       model          = "~anthropic/claude-sonnet-latest";
     //std::string       model          = "qwen/qwen3.6-max-preview";
-    //std::string       model          = "anthropic/claude-sonnet-4.8";
+    //std::string       model          = "anthropic/claude-sonnet-4.6";
 
     std::string       sys_prompt;
     double            temperature    = DEFAULT_TEMPERATURE;
