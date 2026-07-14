@@ -25,7 +25,7 @@
 
 using json = nlohmann::json;
 // ─────────────────────────── Версия ───────────────────────────
-#define APP_VERSION "1.0.20"
+#define APP_VERSION "1.0.3"
 
 
 // Emoji_Presentation: всегда отображается как emoji (ширина 2)
@@ -208,11 +208,11 @@ struct ChatSession {
     //std::string       model          = "qwen/qwen3.6-plus:free";
     //std::string       model          = "xiaomi/mimo-v2-flash";
     //std::string       model          = "xiaomi/mimo-v2-pro"
-     std::string       model          = "deepseek/deepseek-v4-pro";
+    std::string       model          = "deepseek-chat";
     //std::string       model          = "anthropic/claude-opus-4.8";
     //std::string       model          = "~google/gemini-pro-latest";
     //std::string       model          = "~anthropic/claude-sonnet-latest";
-    //std::string       model          = "qwen/qwen3.6-max-preview";
+    //std::string       model          = "qwen-max";
     //std::string       model          = "anthropic/claude-sonnet-4.6";
 
     std::string       sys_prompt;
@@ -237,12 +237,12 @@ static const std::vector<std::string> AVAILABLE_MODELS = {
     "google/gemini-3.1-pro-preview",
     "x-ai/grok-4",
     "xiaomi/mimo-v2-flash",
-    "deepseek/deepseek-v4-pro",
+    "deepseek-chat",
     "anthropic/claude-sonnet-4.6",
     "xiaomi/mimo-v2-pro",
     "~google/gemini-pro-latest",
     "~anthropic/claude-sonnet-latest",
-    "qwen/qwen3.6-max-preview"
+    "qwen-max"
 };
 
 // ─────────────────────────── Сигналы ─────────────────────────
@@ -264,15 +264,16 @@ static void signal_handler(int /*sig*/) {
 
 // ─────────────────────────── API ключ ────────────────────────
 static std::string get_api_key() {
-    const char* env = getenv("OPENROUTER_API_KEY");
+    const char* env = getenv("302_API_KEY");
     if (env && std::string(env).size() > 10) return std::string(env);
     std::string home = get_home_dir();
-    std::ifstream f(home + "/.config/openrouter_key");
+    std::ifstream f(home + "/.config/302_key");
     if (f.is_open()) {
         std::string key;
         std::getline(f, key);
         while (!key.empty() && (key.back() == '\n' || key.back() == '\r' || key.back() == ' '))
             key.pop_back();
+// std::cout << std::endl << "********** " << key << " **********" << std::endl; // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
         if (key.size() > 10) return key;
     }
     std::cerr << C_RED << "[ОШИБКА: API ключ не найден!]" << C_RESET << std::endl;
@@ -1075,9 +1076,12 @@ std::string do_api_request(bool &aborted) {
 
     json jData = {
         {"model", G.model}, {"messages", G.messages},
-        {"temperature", G.temperature}, {"max_tokens", G.max_tokens},
+//        {"temperature", G.temperature}, {"max_tokens", G.max_tokens},  !@!!!!! for 302.ai 
     };
     std::string jsonData = jData.dump(-1, ' ', false, json::error_handler_t::replace);
+
+// std::cout << std::endl << jData << std::endl; ///////  DEBUG !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
     struct curl_slist *headers = nullptr;
     headers = curl_slist_append(headers, "Content-Type: application/json");
     std::string auth = "Authorization: Bearer " + api_key;
@@ -1104,7 +1108,7 @@ std::string do_api_request(bool &aborted) {
     CURLcode res = CURLE_OK; long http_code = 0;
     while (retries-- > 0) {
         state.full_content.clear();
-        curl_easy_setopt(curl, CURLOPT_URL, "https://openrouter.ai/api/v1/chat/completions");
+        curl_easy_setopt(curl, CURLOPT_URL, "https://api.302.ai/v1/chat/completions");
         curl_easy_setopt(curl, CURLOPT_POSTFIELDS, jsonData.c_str());
         curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)jsonData.size());
         curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
@@ -1476,7 +1480,7 @@ void cmd_update() {
 void cmd_balance() {
     std::string api_key = get_api_key();
     if (api_key.empty()) return;
-
+    return; ////////////////////////// temporaly not  working (need change to 302.ai)
     CURL *curl = curl_easy_init();
     if (!curl) {
         std::cerr << C_RED << "[balance: curl init failed]" << C_RESET << std::endl;
