@@ -25,7 +25,7 @@
 
 using json = nlohmann::json;
 // ─────────────────────────── Версия ───────────────────────────
-#define APP_VERSION "1.0.30"
+#define APP_VERSION "1.0.33"
 
 
 // Emoji_Presentation: всегда отображается как emoji (ширина 2)
