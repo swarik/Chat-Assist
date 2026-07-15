@@ -25,7 +25,7 @@
 
 using json = nlohmann::json;
 // ─────────────────────────── Версия ───────────────────────────
-#define APP_VERSION "1.0.33"
+#define APP_VERSION "1.0.34"
 
 
 // Emoji_Presentation: всегда отображается как emoji (ширина 2)
@@ -230,19 +230,21 @@ struct ChatSession {
 static ChatSession G;
 
 static const std::vector<std::string> AVAILABLE_MODELS = {
-    "anthropic/claude-opus-4.8",
-    "anthropic/claude-opus-4.7",
-    "minimax/minimax-m2.7",
-    "openai/gpt-5.2",
-    "google/gemini-3.1-pro-preview",
-    "x-ai/grok-4",
-    "xiaomi/mimo-v2-flash",
+    "claude-sonnet-5",
+    "claude-fable-5",
+    "gpt-5.6-terra",
+    "gpt-5.6-sol",
+    "gemini-3.1-pro-preview",
+    "grok-4.5",
+    "deepseek-reasoner",
     "deepseek-chat",
-    "anthropic/claude-sonnet-4.6",
-    "xiaomi/mimo-v2-pro",
-    "~google/gemini-pro-latest",
-    "~anthropic/claude-sonnet-latest",
-    "qwen-max"
+    "qwen3.7-max",
+    "qwen3.7-plus",
+    "MiniMax-M3",
+    "glm-5.2",
+    "kimi-k2.7-code",
+    "doubao-seed-2-1-turbo-260628",
+    "doubao-seed-2-1-pro-260628"
 };
 
 // ─────────────────────────── Сигналы ─────────────────────────
