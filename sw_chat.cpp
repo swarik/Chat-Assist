@@ -25,7 +25,7 @@
 
 using json = nlohmann::json;
 // ─────────────────────────── Версия ───────────────────────────
-#define APP_VERSION "1.0.34"
+#define APP_VERSION "1.0.37"
 
 
 // Emoji_Presentation: всегда отображается как emoji (ширина 2)
@@ -223,13 +223,15 @@ struct ChatSession {
     bool              autorun                 = false;
     bool              history_enabled          = false;
     bool              nores                    = false; // выкл по умолчанию
+    bool              compact_mode             = false;
     std::string       session_name             = "default";
     std::unordered_map<std::string, std::string> aliases;
 };
 
 static ChatSession G;
 
-static const std::vector<std::string> AVAILABLE_MODELS = {
+// Fallback-список, если API/кэш недоступны
+static const std::vector<std::string> DEFAULT_MODELS = {
     "claude-sonnet-5",
     "claude-fable-5",
     "gpt-5.6-terra",
@@ -246,6 +248,9 @@ static const std::vector<std::string> AVAILABLE_MODELS = {
     "doubao-seed-2-1-turbo-260628",
     "doubao-seed-2-1-pro-260628"
 };
+// Живой список (кэш/API); при старте = DEFAULT_MODELS
+static std::vector<std::string> AVAILABLE_MODELS = DEFAULT_MODELS;
+static std::string MODELS_CACHE_FILE;
 
 // ─────────────────────────── Сигналы ─────────────────────────
 // g_exit_requested: 1 = выход из программы
@@ -275,7 +280,6 @@ static std::string get_api_key() {
         std::getline(f, key);
         while (!key.empty() && (key.back() == '\n' || key.back() == '\r' || key.back() == ' '))
             key.pop_back();
-// std::cout << std::endl << "********** " << key << " **********" << std::endl; // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
         if (key.size() > 10) return key;
     }
     std::cerr << C_RED << "[ОШИБКА: API ключ не найден!]" << C_RESET << std::endl;
@@ -736,6 +740,30 @@ std::string load_system_prompt() {
 }
 
 // ─────────────────────────── Обрезка контекста ───────────────
+// compact_mode quiet UX helpers (early: only need GlobalState G)
+static bool is_compact() { return G.compact_mode; }
+static void note_gray(const std::string& s) {
+    if (is_compact()) return;
+    std::cout << C_GRAY << s << C_RESET << std::endl;
+}
+static void note_yellow(const std::string& s) {
+    if (is_compact()) return;
+    std::cout << C_YELLOW << s << C_RESET << std::endl;
+}
+
+static void print_assistant_text(const std::string& content, bool with_header = true) {
+    if (content.empty()) return;
+    if (is_compact()) {
+        std::cout << content;
+        if (content.back() != char(10)) std::cout << char(10);
+        return;
+    }
+    if (with_header)
+        std::cout << "\n" << C_BOLD << C_CYAN << "[Ассистент]:" << C_RESET << "\n";
+    render_markdown(content);
+    std::cout << std::endl;
+}
+
 void trim_messages_if_needed() {
     if ((int)G.messages.size() <= MAX_MESSAGES) return;
 
@@ -755,8 +783,10 @@ void trim_messages_if_needed() {
         trimmed.push_back(G.messages[i]);
     }
     G.messages = trimmed;
-    std::cout << C_GRAY << "[Контекст обрезан до " << G.messages.size()
-              << " сообщений]" << C_RESET << std::endl;
+    if (!is_compact()) {
+        std::cout << C_GRAY << "[Контекст обрезан до " << G.messages.size()
+                  << " сообщений]" << C_RESET << std::endl;
+    }
 }
 
 // ─────────────────────────── Shell exec ──────────────────────
@@ -795,27 +825,40 @@ std::string exec_with_timeout(const std::string& cmd, int timeout_sec) {
 // Выполняет один bash-блок с подтверждением
 // local_autorun — локальный флаг "запустить все блоки текущего пакета" (не трогает G.autorun)
 std::string execute_single_bash(const std::string &bash_code, int idx, int total, bool &local_autorun) {
-    if (total > 1)
+    if (!is_compact() && total > 1)
         std::cout << C_YELLOW << "[Bash блок " << (idx+1) << "/" << total << "]" << C_RESET << std::endl;
     if (!G.autorun && !local_autorun) {
-        char *rl = readline(C_YELLOW "[Выполнить команду? (y/n/a-все|д/н/в)]: " C_RESET);
+        const char* prompt = is_compact()
+            ? C_YELLOW "[y/n/a]? " C_RESET
+            : C_YELLOW "[Выполнить команду? (y/n/a-все|д/н/в)]: " C_RESET;
+        char *rl = readline(prompt);
         if (!rl) return "[Пользователь отказался выполнять эту команду]";
         std::string ans(rl); free(rl);
         if (ans == "a" || ans == "A" || ans == "в" || ans == "В") {
-            local_autorun = true;  // только для текущего пакета блоков
+            local_autorun = true;
         } else if (ans != "y" && ans != "Y" && ans != "д" && ans != "Д") {
-            std::cout << C_RED << "[Блок " << (idx+1) << " пропущен]" << C_RESET << std::endl;
+            if (!is_compact())
+                std::cout << C_RED << "[Блок " << (idx+1) << " пропущен]" << C_RESET << std::endl;
             return "[Пользователь отказался выполнять эту команду]";
         }
-    } else if (total > 1) {
-        std::cout << C_YELLOW << "[Autorun: выполняю блок " << (idx+1) << "]" << C_RESET << std::endl;
-    } else {
-        std::cout << C_YELLOW << "[Autorun: выполняю автоматически]" << C_RESET << std::endl;
+    } else if (!is_compact()) {
+        if (total > 1)
+            std::cout << C_YELLOW << "[Autorun: выполняю блок " << (idx+1) << "]" << C_RESET << std::endl;
+        else
+            std::cout << C_YELLOW << "[Autorun: выполняю автоматически]" << C_RESET << std::endl;
+        std::cout << C_YELLOW << "[Выполняю...]" << C_RESET << std::endl;
     }
-    std::cout << C_YELLOW << "[Выполняю...]" << C_RESET << std::endl;
     std::string result = exec_with_timeout(bash_code, CMD_TIMEOUT);
-    if (!G.nores)
-        std::cout << C_BLUE << "[Результат]:\n" << result << C_RESET << std::endl;
+    if (!G.nores) {
+        if (is_compact()) {
+            if (!result.empty()) {
+                std::cout << result;
+                if (result.back() != char(10)) std::cout << char(10);
+            }
+        } else {
+            std::cout << C_BLUE << "[Результат]:\n" << result << C_RESET << std::endl;
+        }
+    }
     return result;
 }
 
@@ -847,6 +890,7 @@ static void spinner_loop(std::string model) {
 
 static std::thread g_spinner_thread;
 static void spinner_start(const std::string &model) {
+    if (is_compact()) return; // quiet
     if (g_spinner_run.load()) return;
     g_spinner_run.store(true);
     g_spinner_thread = std::thread(spinner_loop, model);
@@ -877,6 +921,7 @@ static void init_paths() {
     SESSIONS_DIR   = CONFIG_DIR + "/sessions";
     HISTORY_FILE   = SESSIONS_DIR + "/" + G.session_name + ".json";
     READLINE_HIST_FILE = CONFIG_DIR + "/.readline_history";
+    MODELS_CACHE_FILE = CONFIG_DIR + "/models.json";
     ensure_dir(CONFIG_DIR); ensure_dir(SESSIONS_DIR);
     G.history_file = HISTORY_FILE;
 }
@@ -884,6 +929,7 @@ static void save_config() {
     try {
         json j; j["model"]=G.model; j["temperature"]=G.temperature; j["max_tokens"]=G.max_tokens;
         j["autorun"]=G.autorun; j["history_enabled"]=G.history_enabled; j["nores"]=G.nores;
+        j["compact_mode"]=G.compact_mode;
     j["aliases"]=G.aliases;
         std::ofstream f(CONFIG_FILE); if(f.is_open()) f << j.dump(2);
     } catch(...){}
@@ -896,6 +942,7 @@ static void load_config() {
         if(j.count("model")) G.model=j["model"]; if(j.count("temperature")) G.temperature=j["temperature"];
         if(j.count("max_tokens")) G.max_tokens=j["max_tokens"]; if(j.count("autorun")) G.autorun=j["autorun"];
         if(j.count("history_enabled")) G.history_enabled=j["history_enabled"]; if(j.count("nores")) G.nores=j["nores"];
+        if(j.count("compact_mode")) G.compact_mode=j["compact_mode"];
         if(j.count("aliases")) G.aliases=j["aliases"].get<std::unordered_map<std::string,std::string>>();
     } catch(...){}
 }
@@ -958,39 +1005,81 @@ static void export_dialog(const std::string& arg) {
         f<<"## "<<role<<"\n"<<txt<<"\n\n";
     } std::cout << C_GREEN << "[Экспортировано в " << file << "]" << C_RESET << std::endl;
 }
+
+static std::string clip_for_summary(const std::string& s, size_t max_len) {
+    if (s.size() <= max_len) return s;
+    size_t cut = max_len;
+    while (cut > 0 && (s[cut] & 0xC0) == 0x80) --cut;
+    return s.substr(0, cut) + "...";
+}
+
+static std::string build_local_summary(const std::vector<json>& msgs, int from, int to) {
+    std::string out = "[SUMMARY of trimmed context]\n";
+    int n = 0;
+    for (int i = from; i < to && i < (int)msgs.size(); ++i) {
+        if (!msgs[i].count("role") || !msgs[i].count("content")) continue;
+        if (!msgs[i]["content"].is_string()) continue;
+        std::string role = msgs[i]["role"].get<std::string>();
+        if (role == "system") continue;
+        std::string cont = msgs[i]["content"].get<std::string>();
+        std::string flat;
+        flat.reserve(cont.size());
+        bool sp = false;
+        for (size_t k = 0; k < cont.size(); ++k) {
+            char c = cont[k];
+            if (c == 10 || c == 13 || c == 9 || c == 32) {
+                if (!sp) { flat.push_back(32); sp = true; }
+            } else {
+                flat.push_back(c);
+                sp = false;
+            }
+        }
+        out += "- " + role + ": " + clip_for_summary(flat, 180) + "\n";
+        if (++n >= 24) {
+            out += "- ...\n";
+            break;
+        }
+    }
+    if (n == 0) out += "(no user/assistant messages)\n";
+    if (out.size() > 3500) out = clip_for_summary(out, 3500);
+    return out;
+}
+
 static void smart_trim_context() {
     const size_t MAX_CHARS = (G.max_tokens > 0 ? G.max_tokens : 4096) * 3;
     size_t total = 0;
-    for(auto& m : G.messages) {
+    for (auto& m : G.messages) {
         if (m.count("content") && m["content"].is_string())
             total += m["content"].get<std::string>().size();
     }
-    if(total <= MAX_CHARS) return;
+    if (total <= MAX_CHARS) return;
 
     int sys_idx = -1;
-    for(int i=0; i<(int)G.messages.size(); ++i) {
-        if(G.messages[i].count("role") && G.messages[i]["role"] == "system") {
+    for (int i = 0; i < (int)G.messages.size(); ++i) {
+        if (G.messages[i].count("role") && G.messages[i]["role"] == "system") {
             sys_idx = i; break;
         }
     }
 
     size_t sys_size = 0;
-    if (sys_idx >= 0 && G.messages[sys_idx].count("content") && G.messages[sys_idx]["content"].is_string()) {
+    if (sys_idx >= 0 && G.messages[sys_idx].count("content") &&
+        G.messages[sys_idx]["content"].is_string())
         sys_size = G.messages[sys_idx]["content"].get<std::string>().size();
-    }
-    
-    size_t budget = (MAX_CHARS > sys_size) ? (MAX_CHARS - sys_size) : 0;
+
+    const size_t SUMMARY_RESERVE = 4000;
+    size_t budget = (MAX_CHARS > sys_size + SUMMARY_RESERVE)
+        ? (MAX_CHARS - sys_size - SUMMARY_RESERVE)
+        : ((MAX_CHARS > sys_size) ? (MAX_CHARS - sys_size) : 0);
+
     size_t tail_size = 0;
     int split_idx = (int)G.messages.size();
-
     for (int i = (int)G.messages.size() - 1; i >= 0; --i) {
         if (i == sys_idx) continue;
         size_t len = 0;
         if (G.messages[i].count("content") && G.messages[i]["content"].is_string())
             len = G.messages[i]["content"].get<std::string>().size();
-        
         if (tail_size + len > budget) {
-            split_idx = i + 1; 
+            split_idx = i + 1;
             break;
         }
         tail_size += len;
@@ -998,17 +1087,37 @@ static void smart_trim_context() {
     }
 
     int erase_start = (sys_idx >= 0) ? (sys_idx + 1) : 0;
-    if (split_idx > erase_start) {
-        std::cout << C_GRAY << "[Обрезка контекста: удаление сообщений " << erase_start << "-" << split_idx-1 << "]" << C_RESET << std::endl;
-        G.messages.erase(G.messages.begin() + erase_start, G.messages.begin() + split_idx);
+    if (erase_start < (int)G.messages.size() &&
+        G.messages[erase_start].count("role") &&
+        G.messages[erase_start]["role"] == "system" &&
+        G.messages[erase_start].count("content") &&
+        G.messages[erase_start]["content"].is_string()) {
+        std::string c = G.messages[erase_start]["content"].get<std::string>();
+        if (c.rfind("[SUMMARY of trimmed context]", 0) == 0)
+            erase_start++;
     }
-    std::cout << C_GRAY << "[Контекст оптимизирован: " << G.messages.size() << "]" << C_RESET << std::endl;
+
+    if (split_idx > erase_start) {
+        std::string summary = build_local_summary(G.messages, erase_start, split_idx);
+        if (!is_compact()) {
+            std::cout << C_GRAY << "[Trim: " << erase_start << "-" << (split_idx - 1)
+                      << " -> summary " << summary.size() << " bytes]" << C_RESET << std::endl;
+        }
+        G.messages.erase(G.messages.begin() + erase_start, G.messages.begin() + split_idx);
+        json sum = {{"role", "system"}, {"content", summary}};
+        G.messages.insert(G.messages.begin() + erase_start, sum);
+    }
+    if (!is_compact()) {
+        std::cout << C_GRAY << "[Context optimized: " << G.messages.size()
+                  << " msgs, budget ~" << MAX_CHARS << " chars]" << C_RESET << std::endl;
+    }
 }
+
 static char** cmd_completion(const char* text, int start, int end) {
     rl_attempted_completion_over = 1;
     std::vector<std::string> matches;
     std::string t(text);
-    static const std::vector<std::string> cmds = {"/help","/save","/load","/clear","/history","/delete","/retry","/tokens","/model","/temp","/maxtokens","/system","/file","/autorun","/nores","/cost","/balance","/update","/about","/exit","/new","/list","/switch","/alias","/search","/export"};
+    static const std::vector<std::string> cmds = {"/help","/save","/load","/clear","/history","/delete","/retry","/tokens","/model","/models","/temp","/maxtokens","/system","/file","/autorun","/nores","/compact","/cost","/balance","/update","/about","/exit","/new","/list","/switch","/alias","/search","/export"};
     
     try {
         if (start == 0) {
@@ -1034,6 +1143,10 @@ static char** cmd_completion(const char* text, int start, int end) {
 // Индикатор заполнения контекста: цветной бар [██████░░░░] NN% + число сообщений.
 // Возвращает готовую строку-промпт с \001..\002 (невидимая для readline разметка).
 static std::string build_prompt() {
+    // compact: minimal prompt, no context bar / hints
+    if (is_compact())
+        return "\001\033[32m\002\xe2\x9d\xaf \001\033[0m\002";
+
     size_t chars = 0;
     int msgs = 0;
     for (auto& m : G.messages) {
@@ -1077,12 +1190,12 @@ std::string do_api_request(bool &aborted) {
     smart_trim_context();
 
     json jData = {
-        {"model", G.model}, {"messages", G.messages},
-//        {"temperature", G.temperature}, {"max_tokens", G.max_tokens},  !@!!!!! for 302.ai 
+        {"model", G.model},
+        {"messages", G.messages},
+        {"temperature", G.temperature},
+        {"max_tokens", G.max_tokens}
     };
     std::string jsonData = jData.dump(-1, ' ', false, json::error_handler_t::replace);
-
-// std::cout << std::endl << jData << std::endl; ///////  DEBUG !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
     struct curl_slist *headers = nullptr;
     headers = curl_slist_append(headers, "Content-Type: application/json");
@@ -1126,7 +1239,8 @@ std::string do_api_request(bool &aborted) {
         curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
         bool retryable = (res == CURLE_OPERATION_TIMEDOUT || res == CURLE_COULDNT_CONNECT || (http_code >= 500 && http_code < 600));
         if (!retryable || retries == 0) break;
-        std::cout << "\r\033[2K" << C_YELLOW << "[Ошибка сети, повтор через " << backoff << "с...]" << C_RESET << std::flush;
+        if (!is_compact())
+            std::cout << "\r\033[2K" << C_YELLOW << "[Ошибка сети, повтор через " << backoff << "с...]" << C_RESET << std::flush;
         std::this_thread::sleep_for(std::chrono::seconds(backoff));
         backoff *= 2;
     }
@@ -1135,7 +1249,7 @@ std::string do_api_request(bool &aborted) {
 
     bool was_aborted = false;
     { std::lock_guard<std::mutex> lock(g_stream_mutex); if (g_stream_abort) { was_aborted = true; g_stream_abort = 0; } }
-    if (was_aborted) { aborted = true; std::cout << "\n" << C_YELLOW << "[Запрос прерван]" << C_RESET << std::endl; curl_slist_free_all(headers); curl_easy_cleanup(curl); return ""; }
+    if (was_aborted) { aborted = true; if (!is_compact()) std::cout << "\n" << C_YELLOW << "[Запрос прерван]" << C_RESET << std::endl; curl_slist_free_all(headers); curl_easy_cleanup(curl); return ""; }
     if (res != CURLE_OK) { std::cerr << C_RED << "curl: " << curl_easy_strerror(res) << C_RESET << std::endl; curl_slist_free_all(headers); curl_easy_cleanup(curl); return ""; }
     if (http_code != 200) { std::cerr << C_RED << "[HTTP " << http_code << "] " << state.full_content.substr(0, 300) << C_RESET << std::endl; curl_slist_free_all(headers); curl_easy_cleanup(curl); return ""; }
 
@@ -1165,10 +1279,11 @@ void process_response(const std::string &content, bool aborted, size_t msgs_befo
     if (content.empty()) return;
 
     if (aborted) {
-        std::cout << "\n" << C_BOLD << C_CYAN << "[Ассистент]:" << C_RESET << "\n";
-        render_markdown(content);
-        std::cout << std::endl;
-        char *rl_ans = readline(C_YELLOW "[Ответ прерван. Сохранить в историю? (y/n)]: " C_RESET);
+        print_assistant_text(content);
+        const char* prompt = is_compact()
+            ? C_YELLOW "[save y/n]? " C_RESET
+            : C_YELLOW "[Ответ прерван. Сохранить в историю? (y/n)]: " C_RESET;
+        char *rl_ans = readline(prompt);
         std::string ans;
         if (rl_ans) { ans = std::string(rl_ans); free(rl_ans); }
         if (ans != "y" && ans != "Y" && ans != "д" && ans != "Д") {
@@ -1177,7 +1292,7 @@ void process_response(const std::string &content, bool aborted, size_t msgs_befo
             } else if (!G.messages.empty() && G.messages.back()["role"] == "user") {
                 G.messages.pop_back();
             }
-            std::cout << C_GRAY << "[Частичный ответ отброшен]" << C_RESET << std::endl;
+            note_gray("[Частичный ответ отброшен]");
             return;
         }
         G.messages.push_back({{"role", "assistant"}, {"content", content}});
@@ -1230,16 +1345,12 @@ void process_response(const std::string &content, bool aborted, size_t msgs_befo
         
         auto bbs = find_bash_blocks(t);
         if (bbs.empty()) {
-std::cout << "\n" << C_BOLD << C_CYAN << "[Ассистент]:" << C_RESET << "\n";
-
-            render_markdown(t); // Используем обрезанный текст (t), чтобы не было лишних пустых строк
-
-            std::cout << std::endl; // Одна пустая строка перед вводом
-        return "";
-
+            print_assistant_text(t);
+            return "";
         }
 
-        std::cout << "\n" << C_BOLD << C_CYAN << "[Ассистент]:" << C_RESET << "\n";
+        if (!is_compact())
+            std::cout << "\n" << C_BOLD << C_CYAN << "[Ассистент]:" << C_RESET << "\n";
 
         std::string combined_result;
         size_t cur = 0;
@@ -1249,10 +1360,28 @@ std::cout << "\n" << C_BOLD << C_CYAN << "[Ассистент]:" << C_RESET << "
         for (int i = 0; i < total; ++i) {
             // Текст до bash-блока
             if (bbs[i].tag_s > cur) {
-                render_markdown(text.substr(cur, bbs[i].tag_s - cur));
+                std::string chunk = text.substr(cur, bbs[i].tag_s - cur);
+                if (is_compact()) {
+                    if (!chunk.empty()) {
+                        std::cout << chunk;
+                        if (chunk.back() != char(10)) std::cout << char(10);
+                    }
+                } else {
+                    render_markdown(chunk);
+                }
             }
             // Сам bash-блок (визуально)
-            render_markdown(text.substr(bbs[i].tag_s, bbs[i].blk_e - bbs[i].tag_s));
+            {
+                std::string chunk = text.substr(bbs[i].tag_s, bbs[i].blk_e - bbs[i].tag_s);
+                if (is_compact()) {
+                    if (!chunk.empty()) {
+                        std::cout << chunk;
+                        if (chunk.back() != char(10)) std::cout << char(10);
+                    }
+                } else {
+                    render_markdown(chunk);
+                }
+            }
             std::cout << std::flush;
 
             // Выполняем
@@ -1269,7 +1398,7 @@ std::cout << "\n" << C_BOLD << C_CYAN << "[Ассистент]:" << C_RESET << "
         if (cur < t.size()) {
             leftover = t.substr(cur);
         }
-        std::cout << std::endl;
+        if (!is_compact()) std::cout << std::endl;
         return combined_result;
     };
 
@@ -1292,9 +1421,8 @@ std::cout << "\n" << C_BOLD << C_CYAN << "[Ассистент]:" << C_RESET << "
         if (next.empty()) break;
 
         if (chain_aborted) {
-            std::cout << "\n" << C_BOLD << C_CYAN << "[Ассистент]:" << C_RESET << "\n";
-            render_markdown(next);
-            std::cout << "\n" << C_YELLOW << "[Ответ прерван]" << C_RESET << std::endl;
+            print_assistant_text(next);
+            note_yellow("[Ответ прерван]");
             break;
         }
 
@@ -1306,8 +1434,7 @@ std::cout << "\n" << C_BOLD << C_CYAN << "[Ассистент]:" << C_RESET << "
 
     // Если остался leftover и bash-цикл завершился (cmd_result пуст) — рендерим его
     if (!leftover.empty() && cmd_result.empty()) {
-        render_markdown(leftover);
-        std::cout << std::endl;
+        print_assistant_text(leftover, false);
     }
 
     // Автосохранение: пишем всегда, уведомляем раз в 24 сообщения
@@ -1480,60 +1607,23 @@ void cmd_update() {
 }
 
 void cmd_balance() {
+    // 302.ai: no OpenRouter-style credits API in this client.
+    // Honest status + local session token stats (never print full key).
     std::string api_key = get_api_key();
-    if (api_key.empty()) return;
-    return; ////////////////////////// temporaly not  working (need change to 302.ai)
-    CURL *curl = curl_easy_init();
-    if (!curl) {
-        std::cerr << C_RED << "[balance: curl init failed]" << C_RESET << std::endl;
-        return;
+    std::cout << C_CYAN << C_BOLD << "  === Balance / Usage ===" << C_RESET << std::endl;
+    if (api_key.empty()) {
+        std::cout << C_RED << "  API key: not found" << C_RESET << std::endl;
+    } else {
+        std::string tail = api_key.size() > 4 ? api_key.substr(api_key.size() - 4) : api_key;
+        std::cout << "  API key: " << C_GREEN << "ok" << C_RESET
+                  << C_GRAY << " (....." << tail << ")" << C_RESET << std::endl;
     }
-
-    std::string response_body;
-    std::string auth = "Authorization: Bearer " + api_key;
-    struct curl_slist *headers = nullptr;
-    headers = curl_slist_append(headers, auth.c_str());
-
-    curl_easy_setopt(curl, CURLOPT_URL, "https://openrouter.ai/api/v1/credits");
-    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response_body);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 15L);
-
-    CURLcode res = curl_easy_perform(curl);
-    long http_code = 0;
-    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
-    curl_slist_free_all(headers);
-    curl_easy_cleanup(curl);
-
-    if (res != CURLE_OK) {
-        std::cerr << C_RED << "[balance: curl failed: " << curl_easy_strerror(res) << "]" << C_RESET << std::endl;
-        return;
-    }
-
-    if (http_code != 200) {
-        std::cerr << C_RED << "[balance: HTTP " << http_code << "]" << std::endl << response_body << C_RESET << std::endl;
-        return;
-    }
-
-    try {
-        json j = json::parse(response_body);
-        json data = j.count("data") ? j["data"] : j;
-
-        double total_credits = data.value("total_credits", 0.0);
-        double total_usage   = data.value("total_usage", 0.0);
-        double remaining     = total_credits - total_usage;
-
-        std::cout << C_CYAN << C_BOLD << "  === OpenRouter Balance ===" << C_RESET << std::endl;
-        std::cout << "  Credits:  " << C_GREEN << "$" << std::fixed << std::setprecision(4) << total_credits << C_RESET << std::endl;
-        std::cout << "  Used:     " << C_YELLOW << "$" << total_usage << C_RESET << std::endl;
-        std::cout << "  Remain:   " << (remaining > 1.0 ? C_GREEN : C_RED) << "$" << remaining << C_RESET << std::endl;
-    } catch (const std::exception& e) {
-        std::cerr << C_RED << "[balance: parse error: " << e.what() << "]" << std::endl << "Raw: " << response_body << C_RESET << std::endl;
-    }
+    std::cout << "  Provider: " << C_GRAY << "api.302.ai" << C_RESET << std::endl;
+    std::cout << "  Balance:  " << C_YELLOW << "check in 302.ai dashboard" << C_RESET << std::endl;
+    std::cout << "  Session:  " << C_GREEN << G.total_prompt_tokens << C_RESET << " prompt + "
+              << C_GREEN << G.total_completion_tokens << C_RESET << " completion" << std::endl;
 }
 
-// ─────────────────────────── Команда /about ──────────────────
 void cmd_about() {
     std::cout << C_CYAN << C_BOLD << "  === Chat CLI ===" << C_RESET << std::endl;
     std::cout << "  Версия:   " << C_GREEN << APP_VERSION << C_RESET << std::endl;
@@ -1543,6 +1633,7 @@ void cmd_about() {
     std::cout << "  Autorun:  " << (G.autorun ? C_GREEN "вкл" : C_RED "выкл") << C_RESET << std::endl;
     std::cout << "  History:  " << (G.history_enabled ? C_GREEN "вкл" : C_RED "выкл") << C_RESET << std::endl;
     std::cout << "  NoRes:    " << (G.nores ? C_RED "вкл" : C_GREEN "выкл") << " (скрытие вывода bash)" << C_RESET << std::endl;
+    std::cout << "  Compact:  " << (G.compact_mode ? C_GREEN "вкл" : C_RED "выкл") << C_RESET << std::endl;
 
     std::cout << "  Msgs:     " << C_GREEN << G.messages.size() << C_RESET << std::endl;
     std::cout << "  Tokens:   " << C_GREEN << G.total_prompt_tokens << C_RESET << " prompt + "
@@ -1578,22 +1669,197 @@ void do_exit() {
 // ─────────────────────────── Справка ─────────────────────────
 // ─────────────────────── Список моделей ──────────────────────
 
-void cmd_model_select() {
-    std::cout << C_YELLOW << "\n╔══════════════════════════════════════════════════╗\n";
-    std::cout << "║             Доступные модели                     ║\n";
-    std::cout << "╠══════════════════════════════════════════════════╣" << C_RESET << "\n";
+
+// ─────────────────────────── Models cache / live /v1/models ───────────
+static void save_models_cache(const std::vector<std::string>& models) {
+    try {
+        json j;
+        j["updated"] = (int)time(nullptr);
+        j["models"] = models;
+        std::ofstream f(MODELS_CACHE_FILE);
+        if (f.is_open()) f << j.dump(2);
+    } catch (...) {}
+}
+
+static bool load_models_cache() {
+    std::ifstream f(MODELS_CACHE_FILE);
+    if (!f.is_open()) return false;
+    try {
+        std::string c((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        if (c.empty()) return false;
+        json j = json::parse(c);
+        if (!j.count("models") || !j["models"].is_array()) return false;
+        std::vector<std::string> models;
+        for (auto& m : j["models"]) {
+            if (m.is_string()) {
+                std::string id = m.get<std::string>();
+                if (!id.empty()) models.push_back(id);
+            } else if (m.is_object() && m.count("id") && m["id"].is_string()) {
+                models.push_back(m["id"].get<std::string>());
+            }
+        }
+        if (models.empty()) return false;
+        AVAILABLE_MODELS = models;
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+static std::vector<std::string> parse_models_json(const std::string& body) {
+    std::vector<std::string> models;
+    json j = json::parse(body);
+    json arr = json::array();
+    if (j.is_array()) arr = j;
+    else if (j.count("data") && j["data"].is_array()) arr = j["data"];
+    else if (j.count("models") && j["models"].is_array()) arr = j["models"];
+    for (auto& m : arr) {
+        std::string id;
+        if (m.is_string()) id = m.get<std::string>();
+        else if (m.is_object()) {
+            if (m.count("id") && m["id"].is_string()) id = m["id"].get<std::string>();
+            else if (m.count("name") && m["name"].is_string()) id = m["name"].get<std::string>();
+        }
+        if (!id.empty()) models.push_back(id);
+    }
+    std::vector<std::string> uniq;
+    std::unordered_set<std::string> seen;
+    for (auto& id : models) {
+        if (!seen.count(id)) { seen.insert(id); uniq.push_back(id); }
+    }
+    return uniq;
+}
+
+static bool refresh_models_from_api(bool force, bool quiet = false) {
+    if (!force && load_models_cache()) {
+        if (!quiet)
+            std::cout << C_GRAY << "[models] cache: " << AVAILABLE_MODELS.size()
+                      << " models" << C_RESET << std::endl;
+        return true;
+    }
+
+    std::string api_key = get_api_key();
+    if (api_key.empty()) {
+        if (AVAILABLE_MODELS.empty()) AVAILABLE_MODELS = DEFAULT_MODELS;
+        return false;
+    }
+
+    if (!quiet)
+        std::cout << C_YELLOW << "[models] GET /v1/models ..." << C_RESET << std::endl;
+
+    CURL *curl = curl_easy_init();
+    if (!curl) return false;
+
+    std::string response_body;
+    struct curl_slist *headers = nullptr;
+    std::string auth = "Authorization: Bearer " + api_key;
+    headers = curl_slist_append(headers, auth.c_str());
+    headers = curl_slist_append(headers, "Content-Type: application/json");
+
+    curl_easy_setopt(curl, CURLOPT_URL, "https://api.302.ai/v1/models");
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response_body);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 20L);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+
+    CURLcode res = curl_easy_perform(curl);
+    long http_code = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+    curl_slist_free_all(headers);
+    curl_easy_cleanup(curl);
+
+    if (res != CURLE_OK) {
+        if (!quiet)
+            std::cerr << C_RED << "[models] curl: " << curl_easy_strerror(res) << C_RESET << std::endl;
+        if (AVAILABLE_MODELS.empty()) {
+            if (!load_models_cache()) AVAILABLE_MODELS = DEFAULT_MODELS;
+        }
+        return false;
+    }
+    if (http_code != 200) {
+        if (!quiet)
+            std::cerr << C_RED << "[models] HTTP " << http_code << ": "
+                      << response_body.substr(0, 200) << C_RESET << std::endl;
+        if (AVAILABLE_MODELS.empty()) {
+            if (!load_models_cache()) AVAILABLE_MODELS = DEFAULT_MODELS;
+        }
+        return false;
+    }
+
+    try {
+        auto models = parse_models_json(response_body);
+        if (models.empty()) {
+            if (!quiet)
+                std::cerr << C_RED << "[models] empty list from API" << C_RESET << std::endl;
+            if (AVAILABLE_MODELS.empty()) AVAILABLE_MODELS = DEFAULT_MODELS;
+            return false;
+        }
+        AVAILABLE_MODELS = models;
+        save_models_cache(AVAILABLE_MODELS);
+        if (!quiet)
+            std::cout << C_GREEN << "[models] loaded: " << AVAILABLE_MODELS.size()
+                      << " (cache: " << MODELS_CACHE_FILE << ")" << C_RESET << std::endl;
+        return true;
+    } catch (const std::exception& e) {
+        if (!quiet)
+            std::cerr << C_RED << "[models] parse: " << e.what() << C_RESET << std::endl;
+        if (AVAILABLE_MODELS.empty()) AVAILABLE_MODELS = DEFAULT_MODELS;
+        return false;
+    }
+}
+
+static void print_models_list(bool show_header = true) {
+    if (AVAILABLE_MODELS.empty())
+        AVAILABLE_MODELS = DEFAULT_MODELS;
+    if (show_header) {
+        std::cout << C_YELLOW << "\n[ models ]" << C_RESET << "\n";
+    }
     for (size_t i = 0; i < AVAILABLE_MODELS.size(); ++i) {
         bool is_current = (AVAILABLE_MODELS[i] == G.model);
-        if (is_current)
-            std::cout << C_GREEN << C_BOLD;
-        else
-            std::cout << C_CYAN;
+        if (is_current) std::cout << C_GREEN << C_BOLD;
+        else std::cout << C_CYAN;
         printf("  %2zu) %s", i + 1, AVAILABLE_MODELS[i].c_str());
-        if (is_current) std::cout << "  ◄── текущая";
+        if (is_current) std::cout << "  <-- current";
         std::cout << C_RESET << "\n";
     }
-    std::cout << C_YELLOW << "╚══════════════════════════════════════════════════╝" << C_RESET << "\n";
-    char *rl_choice = readline(C_YELLOW "[Номер модели или Enter для отмены]: " C_RESET);
+    std::cout << C_GRAY << "  total: " << AVAILABLE_MODELS.size()
+              << " | cache: " << MODELS_CACHE_FILE << C_RESET << std::endl;
+}
+
+static void cmd_models(const std::string& arg) {
+    std::string a = arg;
+    while (!a.empty() && a[0] == " "[0]) a.erase(0, 1);
+    if (a == "refresh" || a == "live" || a == "update" || a == "force") {
+        refresh_models_from_api(true, false);
+        print_models_list(true);
+        return;
+    }
+    if (a == "cache") {
+        if (!load_models_cache()) {
+            std::cout << C_YELLOW << "[models] empty cache, using defaults" << C_RESET << std::endl;
+            AVAILABLE_MODELS = DEFAULT_MODELS;
+        } else {
+            std::cout << C_GRAY << "[models] from cache" << C_RESET << std::endl;
+        }
+        print_models_list(true);
+        return;
+    }
+    if (!load_models_cache())
+        refresh_models_from_api(true, false);
+    if (AVAILABLE_MODELS.empty())
+        AVAILABLE_MODELS = DEFAULT_MODELS;
+    print_models_list(true);
+}
+
+
+void cmd_model_select() {
+    if (AVAILABLE_MODELS.empty()) {
+        if (!load_models_cache()) AVAILABLE_MODELS = DEFAULT_MODELS;
+    }
+    print_models_list(true);
+char *rl_choice = readline(C_YELLOW "[Номер модели или Enter для отмены]: " C_RESET);
     if (!rl_choice) return;
     std::string choice(rl_choice);
     free(rl_choice);
@@ -1602,6 +1868,7 @@ void cmd_model_select() {
         int idx = std::stoi(choice);
         if (idx >= 1 && idx <= (int)AVAILABLE_MODELS.size()) {
             G.model = AVAILABLE_MODELS[idx - 1];
+            save_config();
             std::cout << C_GREEN << "[Модель: " << G.model << "]" << C_RESET << std::endl;
         } else {
             std::cerr << C_RED << "[Неверный номер]" << C_RESET << std::endl;
@@ -1609,6 +1876,7 @@ void cmd_model_select() {
     } catch (...) {
         // Может быть введено имя модели напрямую
         G.model = choice;
+        save_config();
         std::cout << C_GREEN << "[Модель: " << G.model << "]" << C_RESET << std::endl;
     }
 }
@@ -1624,13 +1892,16 @@ void print_help() {
         << "  /retry             — повторить последний запрос\n"
         << "  /tokens            — показать использование токенов\n"
         << "  /model [name|N]    — выбор модели из списка / по имени / по номеру\n"
+        << "  /models [refresh]  - list models (cache/API 302.ai)\n"
         << "  /temp [0.0-2.0]    — показать/сменить температуру\n"
         << "  /maxtokens [N]     — показать/сменить max_tokens\n"
         << "  /system            — показать системный промпт\n"
         << "  /file <path> [msg] — загрузить файл и задать вопрос\n"
-        << "  /autorun           — вкл/выкл авто-выполнение bash\n  /nores             — вкл/выкл вывод результатов bash\n"
+        << "  /autorun           — вкл/выкл авто-выполнение bash\n"
+        << "  /nores             — вкл/выкл вывод результатов bash\n"
+        << "  /compact           — тихий режим (plain, без подсказок/spinner)\n"
         << "  /cost              — стоимость токенов в $\n"
-        << "  /balance           — проверить баланс OpenRouter\n"
+        << "  /balance           — ключ/провайдер и токены сессии\n"
         << "  /update            — обновление программы\n"
         << "  /about             — информация о программе\n"
         << "  /new [name]        — создать новую сессию\n"
@@ -1889,9 +2160,11 @@ static bool get_user_input(std::string &out) {
             result = sline;
             first_line = false;
             line_num   = 2;
+            if (!is_compact()) {
             std::cout << C_GRAY
                       << "[Многострочный режим: пустой Enter — отправить, '.' — пустая строка, '//' — отправить]"
                       << C_RESET << std::endl;
+            }
         } else {
             // Пустая строка в многострочном режиме — отправляем
             if (sline.empty()) {
@@ -1935,15 +2208,14 @@ static std::string command_arg(const std::string &s, const std::string &cmd) {
 // ─────────────────────────── main ────────────────────────────
 int main(int argc, char *argv[]) {
 
-std::setlocale(LC_ALL, "");
+    std::setlocale(LC_ALL, "");
     rl_catch_signals  = 0;   // Мы сами обрабатываем сигналы
     rl_catch_sigwinch = 1;   // Readline сам обрабатывает ресайз окна
-    // Инициализируем пути
-    std::string home = get_home_dir();
-    HISTORY_FILE       = home + "/tmp/chat_history.json";
-    SYSTEM_PROMPT_FILE = home + "/tmp/system_prompt.txt";
-    READLINE_HIST_FILE = home + "/tmp/.chat_readline_history";
-    G.history_file     = HISTORY_FILE;
+    // Unified path/config init for interactive and pipe/args modes
+    init_paths();
+    load_config();
+    SYSTEM_PROMPT_FILE = get_home_dir() + "/tmp/system_prompt.txt";
+
 
     signal(SIGINT,  signal_handler);
     signal(SIGTERM, signal_handler);
@@ -2022,18 +2294,17 @@ std::setlocale(LC_ALL, "");
             content = "";
         }
         if (!content.empty()) {
-            std::cout << "\n";
-            render_markdown(content);
-            std::cout << std::endl;
+            print_assistant_text(content, false);
         }
         curl_global_cleanup();
         return 0;
     }
 
     // ── Интерактивный режим ──
-    init_paths();
-    load_config();
 
+    if (is_compact()) {
+        std::cout << G.model << std::endl;
+    } else {
     std::cout << C_BOLD << C_CYAN << "=== Chat CLI ===" << C_RESET << std::endl;
     std::cout << C_YELLOW << "Модель: " << G.model << C_RESET << std::endl;
     std::cout << C_YELLOW << "Введите /help для справки" << C_RESET << std::endl;
@@ -2046,6 +2317,7 @@ std::setlocale(LC_ALL, "");
     std::cout << C_GRAY   << "Подсказка: пустой Enter — отправить, '//' — отправить, "
                              "Ctrl+C во время ответа — прервать"
               << C_RESET << std::endl;
+        }
     using_history();
     if (G.history_enabled) read_history(READLINE_HIST_FILE.c_str());
     rl_attempted_completion_function = cmd_completion;
@@ -2083,9 +2355,11 @@ std::setlocale(LC_ALL, "");
             std::string arg = command_arg(userAnswer, "/history");
             if (arg == "on") {
                 G.history_enabled = true;
+                save_config();
                 std::cout << C_YELLOW << "[История: ВКЛЮЧЕНА]" << C_RESET << std::endl;
             } else if (arg == "off") {
                 G.history_enabled = false;
+                save_config();
                 std::cout << C_YELLOW << "[История: ВЫКЛЮЧЕНА]" << C_RESET << std::endl;
             } else {
                 print_history();
@@ -2096,12 +2370,20 @@ std::setlocale(LC_ALL, "");
         if (userAnswer == "/cost")    { print_cost();    continue; }
         if (userAnswer == "/nores") {
             G.nores = !G.nores;
+            save_config();
             std::cout << C_YELLOW << "[Вывод результатов bash: "
                       << (G.nores ? "ВЫКЛЮЧЕН" : "включён") << "]" << C_RESET << std::endl;
             continue;
         }
+        if (userAnswer == "/compact") {
+            G.compact_mode = !G.compact_mode;
+            save_config();
+            std::cout << (G.compact_mode ? "compact on" : "compact off") << std::endl;
+            continue;
+        }
         if (userAnswer == "/autorun") {
             G.autorun = !G.autorun;
+            save_config();
             std::cout << C_YELLOW << "[Autorun: "
                       << (G.autorun ? "ВКЛЮЧЁН ⚡" : "выключен")
                       << "]" << C_RESET << std::endl;
@@ -2198,6 +2480,9 @@ std::setlocale(LC_ALL, "");
         } else if (match_command(userAnswer, "/file")) {
             cmd_file(command_arg(userAnswer, "/file"));
             continue;
+        } else if (match_command(userAnswer, "/models")) {
+            cmd_models(command_arg(userAnswer, "/models"));
+            continue;
         } else if (match_command(userAnswer, "/model")) {
             std::string arg = command_arg(userAnswer, "/model");
             if (!arg.empty()) {
@@ -2212,9 +2497,11 @@ std::setlocale(LC_ALL, "");
                 } catch (...) {
                     G.model = arg;
                 }
+                save_config();
                 std::cout << C_GREEN << "[Модель: " << G.model << "]" << C_RESET << std::endl;
             } else {
                 cmd_model_select();
+                save_config();
             }
             continue;
         } else if (match_command(userAnswer, "/temp")) {
@@ -2224,6 +2511,7 @@ std::setlocale(LC_ALL, "");
                     double t = std::stod(arg);
                     if (t >= 0.0 && t <= 2.0) {
                         G.temperature = t;
+                        save_config();
                         std::cout << C_YELLOW << "[Температура: " << G.temperature
                                   << "]" << C_RESET << std::endl;
                     } else {
@@ -2245,6 +2533,7 @@ std::setlocale(LC_ALL, "");
                     int mt = std::stoi(arg);
                     if (mt > 0) {
                         G.max_tokens = mt;
+                        save_config();
                         std::cout << C_YELLOW << "[max_tokens: " << G.max_tokens
                                   << "]" << C_RESET << std::endl;
                     } else {
