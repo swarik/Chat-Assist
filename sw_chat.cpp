@@ -28,7 +28,7 @@
 
 using json = nlohmann::json;
 // ─────────────────────────── Версия ───────────────────────────
-#define APP_VERSION "1.0.40"
+#define APP_VERSION "1.0.41"
 
 
 // Emoji_Presentation: всегда отображается как emoji (ширина 2)
@@ -187,7 +187,7 @@ static std::string get_home_dir() {
 #define MAX_MSG_CHARS       120000
 #define HISTORY_SAVE_EVERY  8
 #define MODELS_PAGE_SIZE    25
-#define MODELS_MAX_CACHE    800
+#define MODELS_MAX_CACHE    2000
 #define RL_HIST_MAX_CHARS   2000
 #define MAX_BASH_CHAIN      7
 
