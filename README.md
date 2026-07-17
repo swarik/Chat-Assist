@@ -10,6 +10,7 @@
 | Для кого | Linux, работа в консоли |
 | Сервис по умолчанию | [302.ai](https://302.ai) |
 | Исходный код | [`sw_chat.cpp`](./sw_chat.cpp) |
+| Установщик | [`install.sh`](./install.sh) |
 
 ---
 
@@ -47,19 +48,55 @@
 
 ### 1. Установите
 
-**Вариант А — одной командой** (если есть `install.sh` в репозитории):
+#### Способ А — одной командой (рекомендуется)
+
+Скрипт `install.sh` сам поставит зависимости, скачает исходник с GitHub, соберёт программу и положит её в `~/.local/bin`:
 
 ```text
 curl -fsSL https://raw.githubusercontent.com/swarik/Chat-Assist/main/install.sh | bash
 ```
 
-**Вариант Б — вручную** (Ubuntu / Debian):
+Что произойдёт:
+
+1. определятся пакеты вашей системы (apt / dnf / pacman / zypper);
+2. при необходимости установятся `g++`, `curl`, readline, libcurl;
+3. скачается заголовок `nlohmann/json`;
+4. скачается `sw_chat.cpp` из репозитория;
+5. программа соберётся (`-Os`, с `-lpthread`) и установится в `~/.local/bin/sw_chat`;
+6. при необходимости подскажет, как добавить `~/.local/bin` в `PATH`;
+7. проверит API-ключ 302.ai (или подскажет, куда его положить).
+
+**Параметры установщика** (если скачали `install.sh` или клонировали репозиторий):
+
+| Команда | Зачем |
+|:--|:--|
+| `bash install.sh` | Обычная установка с GitHub |
+| `bash install.sh --local` | Собрать из `./sw_chat.cpp` рядом со скриптом (без скачивания) |
+| `bash install.sh --skip-deps` | Не ставить пакеты через sudo (если всё уже есть) |
+| `bash install.sh --help` | Краткая справка |
+
+Примеры:
 
 ```text
-sudo apt-get install -y g++ libreadline-dev libcurl4-openssl-dev
+git clone https://github.com/swarik/Chat-Assist.git
+cd Chat-Assist
+bash install.sh --local
+```
+
+```text
+bash install.sh --skip-deps
+```
+
+> Если ставили через `curl … | bash`, ввод ключа с клавиатуры может быть недоступен  
+> (stdin занят pipe). Это нормально — ключ можно добавить сразу после установки (см. ниже).
+
+#### Способ Б — вручную (Ubuntu / Debian)
+
+```text
+sudo apt-get install -y g++ libreadline-dev libcurl4-openssl-dev curl
 
 mkdir -p ~/.local/include/nlohmann
-curl -fsSL https://raw.githubusercontent.com/nlohmann/json/develop/single_include/nlohmann/json.hpp \
+curl -fsSL https://raw.githubusercontent.com/nlohmann/json/v3.11.3/single_include/nlohmann/json.hpp \
   -o ~/.local/include/nlohmann/json.hpp
 
 curl -fsSL https://raw.githubusercontent.com/swarik/Chat-Assist/main/sw_chat.cpp -o sw_chat.cpp
@@ -67,14 +104,15 @@ curl -fsSL https://raw.githubusercontent.com/swarik/Chat-Assist/main/sw_chat.cpp
 g++ -std=c++17 -Os -I"$HOME/.local/include" -o sw_chat sw_chat.cpp \
   -lreadline -lcurl -lpthread
 
+mkdir -p ~/.local/bin
 cp sw_chat ~/.local/bin/
 ```
 
-Если `~/.local/bin` нет в `PATH`, скопируйте так:
+Если команда `sw_chat` «не находится»:
 
 ```text
-cp sw_chat ~/sw_chat
-chmod +x ~/sw_chat
+~/.local/bin/sw_chat
+export PATH="$HOME/.local/bin:$PATH"
 ```
 
 ### 2. Добавьте API-ключ
@@ -88,7 +126,20 @@ echo "sk-ВАШ-КЛЮЧ" > ~/.config/302_key
 chmod 600 ~/.config/302_key
 ```
 
+Или через переменную окружения (имя начинается с цифры — так и задумано):
+
+```text
+export 302_API_KEY="sk-ВАШ-КЛЮЧ"
+```
+
 Ключ — как пароль: **никому не показывайте** и не публикуйте в GitHub.
+
+Установщик ищет ключ в таком порядке:
+
+1. переменная `302_API_KEY`;
+2. файл `~/.config/302_key`;
+3. если пусто и есть живой терминал — предложит вставить ключ;
+4. если установка шла через pipe — просто напечатает подсказку.
 
 ### 3. Запустите
 
@@ -96,10 +147,10 @@ chmod 600 ~/.config/302_key
 sw_chat
 ```
 
-или, если бинарник лежит дома:
+или полным путём:
 
 ```text
-~/sw_chat
+~/.local/bin/sw_chat
 ```
 
 Напишите вопрос и нажмите **Enter** (ещё раз Enter — отправить).  
@@ -240,6 +291,8 @@ echo "Покажи свободное место на диске" | sw_chat --ex
 | `~/.config/302_key` | Ваш секретный ключ |
 | `~/.config/sw_chat/config.json` | Модель, температура, api_base и др. |
 | `~/.config/sw_chat/sessions/` | Сохранённые диалоги |
+| `~/.local/bin/sw_chat` | Установленная программа |
+| `~/.local/include/nlohmann/json.hpp` | Библиотека JSON (нужна при сборке) |
 | `~/tmp/system_prompt.txt` | Ваши правила для модели (необязательно) |
 
 Свой «характер» ассистента можно задать так:
@@ -261,7 +314,7 @@ nano ~/tmp/system_prompt.txt
 
 Программа рассчитана и на скромное железо (в т.ч. старый 32-bit Linux и ~200+ МБ RAM):
 
-- собирайте с `-Os`;  
+- установщик и ручная сборка используют `-Os`;  
 - не скармливайте гигантские файлы (`/file` ограничен ~200 КБ);  
 - список моделей листайте страницами: `/models p2`;  
 - не включайте `/autorun` «на всякий случай».
@@ -270,22 +323,38 @@ nano ~/tmp/system_prompt.txt
 
 ## Обновление
 
-Внутри чата:
+**Вариант 1 — из самой программы:**
 
 ```text
 /update
 ```
 
-Программа скачает новую версию, покажет, что изменилось, и после вашего «да» пересоберёт себя.
+Скачает новую версию, покажет краткий preview и после согласия пересоберёт себя.
+
+**Вариант 2 — снова запустить установщик:**
+
+```text
+curl -fsSL https://raw.githubusercontent.com/swarik/Chat-Assist/main/install.sh | bash
+```
+
+или из клона:
+
+```text
+bash install.sh --local
+```
 
 ---
 
 ## Что нужно в системе
 
+Установщик постарается поставить это сам. Если ставите вручную:
+
 - компилятор `g++` (C++17)
+- `curl`
 - библиотеки: `libreadline`, `libcurl`
-- заголовок [nlohmann/json](https://github.com/nlohmann/json)
+- заголовок [nlohmann/json](https://github.com/nlohmann/json) (скрипт ставит **v3.11.3**)
 - утилита `timeout` (обычно уже есть в Linux)
+- линковка: `-lreadline -lcurl -lpthread`
 
 Подходит: Ubuntu, Debian, Fedora, Arch, openSUSE.
 
@@ -294,16 +363,23 @@ nano ~/tmp/system_prompt.txt
 ## Частые вопросы
 
 **Не запускается / не найден sw_chat**  
-Запустите полным путём: `~/sw_chat` или добавьте `~/.local/bin` в `PATH`.
+Полный путь: `~/.local/bin/sw_chat`. Добавьте в PATH: `export PATH="$HOME/.local/bin:$PATH"`.  
+Установщик обычно прописывает это в `~/.bashrc` (без дублей) — откройте новый терминал.
 
 **Пишет, что нет ключа**  
-Проверьте файл `~/.config/302_key` или переменную `302_API_KEY`.
+Проверьте файл `~/.config/302_key` или переменную `302_API_KEY` (через `printenv 302_API_KEY`).
+
+**Установка через curl|bash не спросила ключ**  
+Так и должно быть: stdin занят pipe. Положите ключ в `~/.config/302_key` вручную.
+
+**Ошибка компиляции / pthread**  
+Нужна линковка `-lpthread` (в актуальном `install.sh` уже есть). Убедитесь, что стоят dev-пакеты readline и curl.
 
 **Ответ пустой или ошибка сети**  
-Проверьте интернет, ключ и баланс на стороне 302.ai. Команда `/about` покажет базовые настройки.
+Проверьте интернет, ключ и баланс на 302.ai. Команда `/about` покажет базовые настройки.
 
 **Слишком дорого / длинный диалог**  
-`/clear` — обнулить переписку; `/cost` — посмотреть оценку; смените модель на более дешёвую через `/model`.
+`/clear` — обнулить переписку; `/cost` — оценка; смените модель через `/model`.
 
 **Как сменить сервер API?**  
 `/apibase https://api.302.ai` (нужен совместимый с OpenAI Chat Completions API).
@@ -318,12 +394,16 @@ nano ~/tmp/system_prompt.txt
 ### 1.0.38
 Лимиты на файлы, безопаснее история и экспорт, аккуратнее autorun, правки сессий.
 
+### install.sh (актуальный)
+Репозиторий `swarik/Chat-Assist`, ключ 302.ai, сборка `-Os -lpthread`, pin nlohmann v3.11.3, `--local` / `--skip-deps`, без дублей PATH, корректная работа через `curl|bash`.
+
 ---
 
 ## Ссылки
 
 - Репозиторий: [swarik/Chat-Assist](https://github.com/swarik/Chat-Assist)
 - Ключи и модели: [302.ai](https://302.ai)
+- Установщик: [`install.sh`](./install.sh)
 
 ---
 
