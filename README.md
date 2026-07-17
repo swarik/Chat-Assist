@@ -7,7 +7,7 @@
 | | |
 |:--|:--|
 | Версия | **1.0.39** |
-| Для кого | Linux, работа в консоли |
+| Для кого | Linux и **Termux** (Android) |
 | Сервис по умолчанию | [302.ai](https://302.ai) |
 | Исходный код | [`sw_chat.cpp`](./sw_chat.cpp) |
 | Установщик | [`install.sh`](./install.sh) |
@@ -157,6 +157,41 @@ sw_chat
 Справка внутри программы: `/help`
 
 ---
+
+
+### Termux (Android)
+
+На телефоне/планшете в [Termux](https://termux.dev) установщик определяется **сам** (или флаг `--termux`).
+
+```text
+pkg update
+curl -fsSL https://raw.githubusercontent.com/swarik/Chat-Assist/main/install.sh | bash
+```
+
+Из клона репозитория:
+
+```text
+bash install.sh --local
+bash install.sh --termux --local
+```
+
+| | Termux | Обычный Linux |
+|:--|:--|:--|
+| Пакеты | `pkg install` **без sudo** | apt/dnf/pacman/zypper (+ sudo) |
+| Компилятор | `clang++` (или `g++`) | `g++` / `clang++` |
+| Куда ставится | `$PREFIX/bin/sw_chat` | `~/.local/bin/sw_chat` |
+| Ключ API | `~/.config/302_key` | то же |
+| PATH | обычно уже настроен | может дописаться в `~/.bashrc` |
+
+Пакеты в Termux: `clang`, `make`, `curl`, `libcurl`, `readline`, `openssl`, `ca-certificates` (и по возможности `nlohmann-json`).
+
+**Замечания для Android**
+
+- Нужен интернет (Wi‑Fi или мобильные данные) для запросов к API.
+- Если ругается на SSL: `pkg install ca-certificates`.
+- Первая сборка на слабом телефоне может занять несколько минут.
+- Доступ к файлам телефона (опционально): `termux-setup-storage`.
+- Запуск: `sw_chat` или `$PREFIX/bin/sw_chat`.
 
 ## Как пользоваться
 
@@ -375,6 +410,9 @@ bash install.sh --local
 **Ошибка компиляции / pthread**  
 Нужна линковка `-lpthread` (в актуальном `install.sh` уже есть). Убедитесь, что стоят dev-пакеты readline и curl.
 
+**Ставится ли на Android?**  
+Да, в приложении Termux: `pkg update`, затем тот же `install.sh` (или `bash install.sh --termux`). Бинарник: `$PREFIX/bin/sw_chat`.
+
 **Ответ пустой или ошибка сети**  
 Проверьте интернет, ключ и баланс на 302.ai. Команда `/about` покажет базовые настройки.
 
@@ -395,7 +433,7 @@ bash install.sh --local
 Лимиты на файлы, безопаснее история и экспорт, аккуратнее autorun, правки сессий.
 
 ### install.sh (актуальный)
-Репозиторий `swarik/Chat-Assist`, ключ 302.ai, сборка `-Os -lpthread`, pin nlohmann v3.11.3, `--local` / `--skip-deps`, без дублей PATH, корректная работа через `curl|bash`.
+Поддержка **Termux** (`--termux`, `pkg`, `$PREFIX/bin`). Репозиторий `swarik/Chat-Assist`, ключ 302.ai, сборка `-Os -lpthread`, pin nlohmann v3.11.3, `--local` / `--skip-deps`, без дублей PATH, корректная работа через `curl|bash`.
 
 ---
 
