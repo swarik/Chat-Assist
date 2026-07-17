@@ -6,6 +6,7 @@
 #include <fstream>
 #include <cstdio>
 #include <cctype>
+#include <wchar.h>
 #include <unordered_map>
 #include <sys/stat.h>
 #include <dirent.h>
@@ -13,10 +14,12 @@
 #include <string>
 #include <vector>
 #include <signal.h>
+#include <sys/wait.h>
 #include <sstream>
 #include <atomic>
 #include <thread>
 #include <chrono>
+#include <ctime>
 #include <mutex>
 #include <readline/readline.h>
 #include <readline/history.h>
@@ -25,7 +28,7 @@
 
 using json = nlohmann::json;
 // ─────────────────────────── Версия ───────────────────────────
-#define APP_VERSION "1.0.37"
+#define APP_VERSION "1.0.39"
 
 
 // Emoji_Presentation: всегда отображается как emoji (ширина 2)
@@ -180,10 +183,18 @@ static std::string get_home_dir() {
 // ─────────────────────────── Константы ───────────────────────
 #define CMD_TIMEOUT         250
 #define MAX_CMD_OUTPUT      50000
+#define MAX_FILE_BYTES      200000
+#define MAX_MSG_CHARS       120000
+#define HISTORY_SAVE_EVERY  8
+#define MODELS_PAGE_SIZE    25
+#define MODELS_MAX_CACHE    400
+#define RL_HIST_MAX_CHARS   2000
+#define MAX_BASH_CHAIN      7
 
 #define MAX_MESSAGES        500
 #define DEFAULT_TEMPERATURE 0.7
 #define DEFAULT_MAX_TOKENS  4096
+#define DEFAULT_API_BASE    "https://api.302.ai"
 
 static std::string HISTORY_FILE;
 static std::string SYSTEM_PROMPT_FILE;
@@ -225,6 +236,7 @@ struct ChatSession {
     bool              nores                    = false; // выкл по умолчанию
     bool              compact_mode             = false;
     std::string       session_name             = "default";
+    std::string       api_base                 = DEFAULT_API_BASE;
     std::unordered_map<std::string, std::string> aliases;
 };
 
@@ -251,6 +263,8 @@ static const std::vector<std::string> DEFAULT_MODELS = {
 // Живой список (кэш/API); при старте = DEFAULT_MODELS
 static std::vector<std::string> AVAILABLE_MODELS = DEFAULT_MODELS;
 static std::string MODELS_CACHE_FILE;
+// live pricing from /v1/models when API provides it: model -> (prompt$/MTok, completion$/MTok)
+static std::unordered_map<std::string, std::pair<double,double>> MODEL_PRICING_LIVE;
 
 // ─────────────────────────── Сигналы ─────────────────────────
 // g_exit_requested: 1 = выход из программы
@@ -770,7 +784,7 @@ void trim_messages_if_needed() {
     std::vector<json> trimmed;
     int sys_idx = -1;
     for (int i = 0; i < (int)G.messages.size(); ++i) {
-        if (G.messages[i]["role"] == "system") { sys_idx = i; break; }
+        if (G.messages[i].value("role", "") == "system") { sys_idx = i; break; }
     }
     if (sys_idx >= 0) trimmed.push_back(G.messages[sys_idx]);
 
@@ -800,26 +814,69 @@ static std::string shell_escape(const std::string& s) {
     return result;
 }
 
-std::string exec_with_timeout(const std::string& cmd, int timeout_sec) {
+struct ExecResult {
+    std::string output;
+    int exit_code = -1;
+    bool timed_out = false;
+    bool popen_failed = false;
+};
+
+static std::string format_exec_result(const ExecResult& er, int timeout_sec) {
+    std::string body = er.output;
+    while (!body.empty() && (body.back() == '\n' || body.back() == '\r' || body.back() == ' '))
+        body.pop_back();
+    std::string out;
+    if (er.popen_failed) {
+        out = "[popen failed]";
+    } else if (body.empty()) {
+        // A4: explicit empty output so the model does not assume failure/silence
+        out = "(empty output, exit " + std::to_string(er.exit_code) + ")";
+    } else {
+        out = er.output;
+        if (!out.empty() && out.back() != '\n') out.push_back('\n');
+        // A5: always expose exit code to the model / user context
+        out += "[exit: " + std::to_string(er.exit_code) + "]";
+    }
+    if (er.timed_out)
+        out += "\n[ТАЙМАУТ: команда прервана после " + std::to_string(timeout_sec) + " сек]";
+    return out;
+}
+
+ExecResult exec_with_timeout_ex(const std::string& cmd, int timeout_sec) {
+    ExecResult er;
     std::string safe_cmd = "timeout " + std::to_string(timeout_sec) +
                            " bash -c " + shell_escape(cmd) + " 2>&1";
-    std::string result;
     char buffer[256];
     FILE* pipe = popen(safe_cmd.c_str(), "r");
-    if (!pipe) return "[popen failed]";
+    if (!pipe) {
+        er.popen_failed = true;
+        er.exit_code = 127;
+        return er;
+    }
     while (fgets(buffer, sizeof(buffer), pipe) != nullptr)
-        result += buffer;
+        er.output += buffer;
     int ret = pclose(pipe);
-    if (WIFEXITED(ret) && WEXITSTATUS(ret) == 124)
-        result += "\n[ТАЙМАУТ: команда прервана после " + std::to_string(timeout_sec) + " сек]";
-    if (result.size() > (size_t)MAX_CMD_OUTPUT) {
+    if (WIFEXITED(ret)) {
+        er.exit_code = WEXITSTATUS(ret);
+        if (er.exit_code == 124) er.timed_out = true;
+    } else if (WIFSIGNALED(ret)) {
+        er.exit_code = 128 + WTERMSIG(ret);
+    } else {
+        er.exit_code = -1;
+    }
+    if (er.output.size() > (size_t)MAX_CMD_OUTPUT) {
         size_t cut = MAX_CMD_OUTPUT;
-        while (cut > 0 && (result[cut] & 0xC0) == 0x80) --cut;
-        result = result.substr(0, cut) +
+        while (cut > 0 && (er.output[cut] & 0xC0) == 0x80) --cut;
+        er.output = er.output.substr(0, cut) +
                  "\n[...вывод обрезан, превышен лимит " +
                  std::to_string(MAX_CMD_OUTPUT) + " байт...]";
     }
-    return result;
+    return er;
+}
+
+// back-compat wrapper
+std::string exec_with_timeout(const std::string& cmd, int timeout_sec) {
+    return format_exec_result(exec_with_timeout_ex(cmd, timeout_sec), timeout_sec);
 }
 
 // Выполняет один bash-блок с подтверждением
@@ -925,12 +982,18 @@ static void init_paths() {
     ensure_dir(CONFIG_DIR); ensure_dir(SESSIONS_DIR);
     G.history_file = HISTORY_FILE;
 }
+static std::string normalize_api_base(std::string u) {
+    while (!u.empty() && (u.back() == '/' || u.back() == ' ')) u.pop_back();
+    if (u.empty()) u = DEFAULT_API_BASE;
+    return u;
+}
 static void save_config() {
     try {
         json j; j["model"]=G.model; j["temperature"]=G.temperature; j["max_tokens"]=G.max_tokens;
         j["autorun"]=G.autorun; j["history_enabled"]=G.history_enabled; j["nores"]=G.nores;
         j["compact_mode"]=G.compact_mode;
-    j["aliases"]=G.aliases;
+        j["api_base"]=G.api_base;
+        j["aliases"]=G.aliases;
         std::ofstream f(CONFIG_FILE); if(f.is_open()) f << j.dump(2);
     } catch(...){}
 }
@@ -943,15 +1006,22 @@ static void load_config() {
         if(j.count("max_tokens")) G.max_tokens=j["max_tokens"]; if(j.count("autorun")) G.autorun=j["autorun"];
         if(j.count("history_enabled")) G.history_enabled=j["history_enabled"]; if(j.count("nores")) G.nores=j["nores"];
         if(j.count("compact_mode")) G.compact_mode=j["compact_mode"];
+        if(j.count("api_base") && j["api_base"].is_string())
+            G.api_base = normalize_api_base(j["api_base"].get<std::string>());
         if(j.count("aliases")) G.aliases=j["aliases"].get<std::unordered_map<std::string,std::string>>();
     } catch(...){}
 }
 static void switch_session(const std::string& name) {
-    if(G.history_enabled) save_history(true);
-    G.session_name = name; HISTORY_FILE = SESSIONS_DIR + "/" + name + ".json";
-    G.history_file = HISTORY_FILE; G.messages.clear();
+    if (G.history_enabled) save_history(true);
+    G.session_name = name;
+    HISTORY_FILE = SESSIONS_DIR + "/" + name + ".json";
+    G.history_file = HISTORY_FILE;
+    G.messages.clear();
+    G.total_prompt_tokens = 0;
+    G.total_completion_tokens = 0;
     G.messages.push_back({{"role","system"},{"content",G.sys_prompt}});
-    load_history(); std::cout << C_GREEN << "[Сессия: " << name << "]" << C_RESET << std::endl;
+    load_history();
+    std::cout << C_GREEN << "[Сессия: " << name << "]" << C_RESET << std::endl;
 }
 static void list_sessions() {
     DIR* dir = opendir(SESSIONS_DIR.c_str());
@@ -978,7 +1048,9 @@ static void search_history(const std::string& query) {
     std::string q=query; std::transform(q.begin(),q.end(),q.begin(),::tolower);
     bool found=false;
     for(size_t i=0;i<G.messages.size();++i) {
-        std::string role=G.messages[i]["role"]; std::string cont=G.messages[i]["content"];
+        std::string role = G.messages[i].value("role", std::string(""));
+        if (!G.messages[i].count("content") || !G.messages[i]["content"].is_string()) continue;
+        std::string cont = G.messages[i]["content"].get<std::string>();
         std::string low=cont; std::transform(low.begin(),low.end(),low.begin(),::tolower);
         if(low.find(q)!=std::string::npos) {
             if(cont.size()>150) cont=cont.substr(0,150)+"...";
@@ -998,12 +1070,23 @@ static void export_dialog(const std::string& arg) {
     size_t sp=arg.find(' '); if(sp!=std::string::npos){fmt=arg.substr(0,sp);file=arg.substr(sp+1);}
     else if(!arg.empty()){fmt=arg;file="dialog_export."+fmt;}
     std::ofstream f(file); if(!f.is_open()){std::cerr<<C_RED<<"[Не удалось создать файл]"<<C_RESET<<std::endl;return;}
-    for(auto& m:G.messages){
-        std::string role=m["role"]; std::string cont=m["content"];
-        if(fmt=="json"){f<<m.dump(2)<<",\n";continue;}
-        std::string txt=(fmt=="txt")?strip_ansi(cont):cont;
-        f<<"## "<<role<<"\n"<<txt<<"\n\n";
-    } std::cout << C_GREEN << "[Экспортировано в " << file << "]" << C_RESET << std::endl;
+    if (fmt == "json") {
+        json arr = json::array();
+        for (auto& m : G.messages) arr.push_back(m);
+        f << arr.dump(2, ' ', false, json::error_handler_t::replace);
+    } else {
+        for (auto& m : G.messages) {
+            std::string role = m.value("role", std::string("unknown"));
+            std::string cont;
+            if (m.count("content") && m["content"].is_string())
+                cont = m["content"].get<std::string>();
+            else if (m.count("content"))
+                cont = m["content"].dump();
+            std::string txt = (fmt == "txt") ? strip_ansi(cont) : cont;
+            f << "## " << role << "\n" << txt << "\n\n";
+        }
+    }
+    std::cout << C_GREEN << "[Экспортировано в " << file << "]" << C_RESET << std::endl;
 }
 
 static std::string clip_for_summary(const std::string& s, size_t max_len) {
@@ -1011,6 +1094,19 @@ static std::string clip_for_summary(const std::string& s, size_t max_len) {
     size_t cut = max_len;
     while (cut > 0 && (s[cut] & 0xC0) == 0x80) --cut;
     return s.substr(0, cut) + "...";
+}
+
+static std::string clamp_message_content(const std::string& s, size_t max_len = MAX_MSG_CHARS) {
+    if (s.size() <= max_len) return s;
+    size_t cut = max_len;
+    while (cut > 0 && (s[cut] & 0xC0) == 0x80) --cut;
+    std::string out = s.substr(0, cut);
+    out += "\n[...сообщение обрезано, лимит " + std::to_string(max_len) + " байт...]";
+    if (!is_compact()) {
+        std::cout << C_YELLOW << "[Сообщение обрезано: " << s.size()
+                  << " -> " << max_len << " байт]" << C_RESET << std::endl;
+    }
+    return out;
 }
 
 static std::string build_local_summary(const std::vector<json>& msgs, int from, int to) {
@@ -1117,7 +1213,7 @@ static char** cmd_completion(const char* text, int start, int end) {
     rl_attempted_completion_over = 1;
     std::vector<std::string> matches;
     std::string t(text);
-    static const std::vector<std::string> cmds = {"/help","/save","/load","/clear","/history","/delete","/retry","/tokens","/model","/models","/temp","/maxtokens","/system","/file","/autorun","/nores","/compact","/cost","/balance","/update","/about","/exit","/new","/list","/switch","/alias","/search","/export"};
+    static const std::vector<std::string> cmds = {"/help","/save","/load","/clear","/history","/delete","/retry","/tokens","/model","/models","/apibase","/temp","/maxtokens","/system","/file","/autorun","/nores","/compact","/cost","/balance","/update","/about","/exit","/new","/list","/switch","/alias","/search","/export"};
     
     try {
         if (start == 0) {
@@ -1140,6 +1236,69 @@ static char** cmd_completion(const char* text, int start, int end) {
     res[matches.size()] = nullptr;
     return res;
 }
+// D5: readline history — multiline -> one visual line
+static std::string history_oneline(const std::string& s, size_t max_len = RL_HIST_MAX_CHARS) {
+    std::string h;
+    h.reserve(std::min(s.size() + 8, max_len + 8));
+    for (size_t i = 0; i < s.size(); ++i) {
+        unsigned char c = (unsigned char)s[i];
+        if (c == '\n') {
+            h += " / "; // multiline marker in readline history
+        } else if (c == '\r') {
+            continue;
+        } else if (c == '\t') {
+            h += ' ';
+        } else {
+            h += (char)c;
+        }
+        if (h.size() >= max_len) {
+            h += "...";
+            break;
+        }
+    }
+    return h;
+}
+
+// E5: rough token estimate (chars/4 + per-message overhead)
+static size_t approx_tokens_messages() {
+    size_t chars = 0;
+    size_t msgs = 0;
+    for (auto& m : G.messages) {
+        ++msgs;
+        if (m.count("content") && m["content"].is_string())
+            chars += m["content"].get<std::string>().size();
+        else if (m.count("content"))
+            chars += m["content"].dump().size();
+    }
+    return chars / 4 + msgs * 6;
+}
+
+static size_t approx_context_chars() {
+    size_t chars = 0;
+    for (auto& m : G.messages) {
+        if (m.count("content") && m["content"].is_string())
+            chars += m["content"].get<std::string>().size();
+    }
+    return chars;
+}
+
+static std::string to_lower_copy(std::string s) {
+    std::transform(s.begin(), s.end(), s.begin(), ::tolower);
+    return s;
+}
+
+// C3/D4: filter + paginate models list
+static std::vector<std::string> filter_models(const std::string& filt) {
+    if (filt.empty()) return AVAILABLE_MODELS;
+    std::string f = to_lower_copy(filt);
+    std::vector<std::string> out;
+    for (auto& m : AVAILABLE_MODELS) {
+        std::string ml = to_lower_copy(m);
+        if (ml.find(f) != std::string::npos) out.push_back(m);
+    }
+    return out;
+}
+
 // Индикатор заполнения контекста: цветной бар [██████░░░░] NN% + число сообщений.
 // Возвращает готовую строку-промпт с \001..\002 (невидимая для readline разметка).
 static std::string build_prompt() {
@@ -1175,6 +1334,7 @@ static std::string build_prompt() {
     p += "\001"; p += col;      p += "\002"; p += bar;
     p += "\001"; p += C_GRAY;   p += "\002"; p += " " + std::string(pct_s) + "%";
     p += " \xc2\xb7 " + std::to_string(msgs) + " msg";
+    p += " \xc2\xb7 ~" + std::to_string(approx_tokens_messages()) + " tok";
     p += "\001"; p += C_RESET;  p += "\002"; p += "\n";
     p += "\001"; p += C_BOLD;   p += C_GREEN; p += "\002"; p += "\xe2\x9d\xaf "; // ❯
     p += "\001"; p += C_RESET;  p += "\002";
@@ -1189,6 +1349,16 @@ std::string do_api_request(bool &aborted) {
     if (!curl) return "";
     smart_trim_context();
 
+    // E5: local estimate after trim
+    {
+        size_t est = approx_tokens_messages();
+        size_t ch = approx_context_chars();
+        if (!is_compact()) {
+            std::cout << C_GRAY << "[context ~" << est << " tok / " << ch
+                      << " chars, max_tokens=" << G.max_tokens << "]" << C_RESET << std::endl;
+        }
+    }
+
     json jData = {
         {"model", G.model},
         {"messages", G.messages},
@@ -1196,6 +1366,7 @@ std::string do_api_request(bool &aborted) {
         {"max_tokens", G.max_tokens}
     };
     std::string jsonData = jData.dump(-1, ' ', false, json::error_handler_t::replace);
+    std::string chat_url = normalize_api_base(G.api_base) + "/v1/chat/completions";
 
     struct curl_slist *headers = nullptr;
     headers = curl_slist_append(headers, "Content-Type: application/json");
@@ -1223,7 +1394,7 @@ std::string do_api_request(bool &aborted) {
     CURLcode res = CURLE_OK; long http_code = 0;
     while (retries-- > 0) {
         state.full_content.clear();
-        curl_easy_setopt(curl, CURLOPT_URL, "https://api.302.ai/v1/chat/completions");
+        curl_easy_setopt(curl, CURLOPT_URL, chat_url.c_str());
         curl_easy_setopt(curl, CURLOPT_POSTFIELDS, jsonData.c_str());
         curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)jsonData.size());
         curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
@@ -1289,7 +1460,7 @@ void process_response(const std::string &content, bool aborted, size_t msgs_befo
         if (ans != "y" && ans != "Y" && ans != "д" && ans != "Д") {
             if (msgs_before > 0 && msgs_before <= G.messages.size()) {
                 G.messages.resize(msgs_before);
-            } else if (!G.messages.empty() && G.messages.back()["role"] == "user") {
+            } else if (!G.messages.empty() && G.messages.back().value("role", "") == "user") {
                 G.messages.pop_back();
             }
             note_gray("[Частичный ответ отброшен]");
@@ -1299,9 +1470,7 @@ void process_response(const std::string &content, bool aborted, size_t msgs_befo
         return;
     }
 
-    // ── Ищем bash-блоки в ответе ──
-    const std::string open_tag = "```bash";
-
+    // ── Ищем bash-блоки в ответе (```bash / ```sh, пробелы в info-string) ──
     auto find_closing = [](const std::string &text, size_t from) -> size_t {
         size_t pos = from;
         while (pos < text.size()) {
@@ -1317,19 +1486,42 @@ void process_response(const std::string &content, bool aborted, size_t msgs_befo
         return std::string::npos;
     };
 
+    // true if fence language is bash/sh (case-insensitive), allows spaces
+    auto is_exec_fence = [](const std::string &text, size_t ts, size_t &code_start) -> bool {
+        if (ts + 3 > text.size() || text.compare(ts, 3, "```") != 0) return false;
+        size_t i = ts + 3;
+        while (i < text.size() && (text[i] == ' ' || text[i] == '\t')) ++i;
+        auto is_alpha = [](char c) {
+            return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+        };
+        size_t lang_s = i;
+        while (i < text.size() && is_alpha(text[i])) ++i;
+        if (lang_s == i) return false;
+        std::string lang = text.substr(lang_s, i - lang_s);
+        for (char &c : lang) if (c >= 'A' && c <= 'Z') c = char(c - 'A' + 'a');
+        if (lang != "bash" && lang != "sh") return false;
+        while (i < text.size() && text[i] != '\n' && text[i] != '\r') ++i;
+        if (i < text.size() && text[i] == '\r') ++i;
+        if (i < text.size() && text[i] == '\n') ++i;
+        code_start = i;
+        return true;
+    };
+
     struct BBlock { size_t tag_s, code_s, code_e, blk_e; std::string code; };
     auto find_bash_blocks = [&](const std::string &text) {
         std::vector<BBlock> bbs;
         size_t pos = 0;
         while (pos < text.size()) {
-            auto ts = text.find(open_tag, pos);
+            auto ts = text.find("```", pos);
             if (ts == std::string::npos) break;
-            auto cs = ts + open_tag.size();
+            size_t cs = 0;
+            if (!is_exec_fence(text, ts, cs)) { pos = ts + 3; continue; }
             auto ce = find_closing(text, cs);
             if (ce == std::string::npos) break;
             auto be = ce + 3;
             if (be < text.size() && text[be] == '\n') be++;
-            bbs.push_back({ts, cs, ce, be, text.substr(cs, ce - cs)});
+            std::string code = text.substr(cs, ce - cs);
+            bbs.push_back({ts, cs, ce, be, code});
             pos = be;
         }
         return bbs;
@@ -1410,8 +1602,12 @@ void process_response(const std::string &content, bool aborted, size_t msgs_befo
     G.messages.push_back({{"role", "assistant"}, {"content", content}});
 
     // Цикл: если были bash-результаты, отправляем модели
-    const int MAX_BASH_CHAIN = 7;
     for (int chain = 0; chain < MAX_BASH_CHAIN && !cmd_result.empty(); ++chain) {
+        // D8: chain progress
+        if (!is_compact()) {
+            std::cout << C_CYAN << C_BOLD << "[bash chain " << (chain + 1)
+                      << "/" << MAX_BASH_CHAIN << "]" << C_RESET << std::endl;
+        }
         // Если был leftover — добавляем его перед результатами в сообщение user
         std::string user_msg = "[Результат выполнения команды]:\n" + cmd_result;
         G.messages.push_back({{"role", "user"}, {"content", user_msg}});
@@ -1500,7 +1696,14 @@ void cmd_update() {
             std::vector<int> parts;
             std::stringstream ss(s);
             std::string token;
-            while (std::getline(ss, token, '.')) parts.push_back(std::stoi(token));
+            while (std::getline(ss, token, '.')) {
+                // take leading digits only: "37-beta" -> 37
+                size_t i = 0;
+                while (i < token.size() && token[i] >= '0' && token[i] <= '9') ++i;
+                if (i == 0) { parts.push_back(0); continue; }
+                try { parts.push_back(std::stoi(token.substr(0, i))); }
+                catch (...) { parts.push_back(0); }
+            }
             return parts;
         };
         auto rv = split(remote);
@@ -1532,6 +1735,70 @@ void cmd_update() {
     }
 
     std::cout << C_YELLOW << "[update] Доступна новая версия: " << remote_ver << C_RESET << std::endl;
+
+    // D6: brief colored "diff" / changelog preview vs local source
+    {
+        std::string local_src;
+        {
+            // try common locations
+            std::vector<std::string> cands = {
+                home + "/tmp/sw_chat.cpp",
+                home + "/sw_chat.cpp"
+            };
+            for (auto& pth : cands) {
+                std::ifstream lf(pth);
+                if (!lf.is_open()) continue;
+                local_src.assign((std::istreambuf_iterator<char>(lf)), std::istreambuf_iterator<char>());
+                if (!local_src.empty()) break;
+            }
+        }
+        auto interesting = [](const std::string& line) -> bool {
+            if (line.find("APP_VERSION") != std::string::npos) return true;
+            if (line.find("void cmd_") != std::string::npos) return true;
+            if (line.find("static void cmd_") != std::string::npos) return true;
+            if (line.find("/help") != std::string::npos) return true;
+            if (line.find("void print_help") != std::string::npos) return true;
+            if (line.find("#define ") != std::string::npos) return true;
+            if (line.find("CHANGELOG") != std::string::npos || line.find("Changelog") != std::string::npos) return true;
+            if (line.find("api_base") != std::string::npos) return true;
+            return false;
+        };
+        std::unordered_set<std::string> local_lines;
+        {
+            std::istringstream ss(local_src);
+            std::string line;
+            while (std::getline(ss, line)) {
+                if (!line.empty() && line.back() == '\r') line.pop_back();
+                if (interesting(line)) local_lines.insert(line);
+            }
+        }
+        std::vector<std::string> added;
+        {
+            std::istringstream ss(src_body);
+            std::string line;
+            while (std::getline(ss, line)) {
+                if (!line.empty() && line.back() == '\r') line.pop_back();
+                if (!interesting(line)) continue;
+                if (!local_lines.count(line)) added.push_back(line);
+            }
+        }
+        std::cout << C_GRAY << "[update] remote size: " << src_body.size()
+                  << " bytes (local src: " << local_src.size() << ")" << C_RESET << std::endl;
+        if (added.empty()) {
+            std::cout << C_GRAY << "[update] changelog: no marked feature-lines delta (version bump only?)"
+                      << C_RESET << std::endl;
+        } else {
+            std::cout << C_GREEN << "[update] new/interesting lines (+"
+                      << added.size() << ", show up to 20):" << C_RESET << std::endl;
+            size_t shown = 0;
+            for (auto& ln : added) {
+                std::string s = ln;
+                if (s.size() > 120) s = s.substr(0, 117) + "...";
+                std::cout << C_GREEN << "  + " << C_RESET << s << std::endl;
+                if (++shown >= 20) break;
+            }
+        }
+    }
 
     // Запрашиваем согласие пользователя
     {
@@ -1618,7 +1885,7 @@ void cmd_balance() {
         std::cout << "  API key: " << C_GREEN << "ok" << C_RESET
                   << C_GRAY << " (....." << tail << ")" << C_RESET << std::endl;
     }
-    std::cout << "  Provider: " << C_GRAY << "api.302.ai" << C_RESET << std::endl;
+    std::cout << "  Provider: " << C_GRAY << normalize_api_base(G.api_base) << C_RESET << std::endl;
     std::cout << "  Balance:  " << C_YELLOW << "check in 302.ai dashboard" << C_RESET << std::endl;
     std::cout << "  Session:  " << C_GREEN << G.total_prompt_tokens << C_RESET << " prompt + "
               << C_GREEN << G.total_completion_tokens << C_RESET << " completion" << std::endl;
@@ -1634,6 +1901,7 @@ void cmd_about() {
     std::cout << "  History:  " << (G.history_enabled ? C_GREEN "вкл" : C_RED "выкл") << C_RESET << std::endl;
     std::cout << "  NoRes:    " << (G.nores ? C_RED "вкл" : C_GREEN "выкл") << " (скрытие вывода bash)" << C_RESET << std::endl;
     std::cout << "  Compact:  " << (G.compact_mode ? C_GREEN "вкл" : C_RED "выкл") << C_RESET << std::endl;
+    std::cout << "  API base: " << C_GREEN << normalize_api_base(G.api_base) << C_RESET << std::endl;
 
     std::cout << "  Msgs:     " << C_GREEN << G.messages.size() << C_RESET << std::endl;
     std::cout << "  Tokens:   " << C_GREEN << G.total_prompt_tokens << C_RESET << " prompt + "
@@ -1671,11 +1939,19 @@ void do_exit() {
 
 
 // ─────────────────────────── Models cache / live /v1/models ───────────
+static double json_price_to_per_mtok(const json& v); // defined near parse_models_json
 static void save_models_cache(const std::vector<std::string>& models) {
     try {
         json j;
         j["updated"] = (int)time(nullptr);
         j["models"] = models;
+        if (!MODEL_PRICING_LIVE.empty()) {
+            json pr = json::object();
+            for (auto& kv : MODEL_PRICING_LIVE) {
+                pr[kv.first] = { {"prompt", kv.second.first}, {"completion", kv.second.second} };
+            }
+            j["pricing"] = pr;
+        }
         std::ofstream f(MODELS_CACHE_FILE);
         if (f.is_open()) f << j.dump(2);
     } catch (...) {}
@@ -1700,10 +1976,50 @@ static bool load_models_cache() {
         }
         if (models.empty()) return false;
         AVAILABLE_MODELS = models;
+        if (j.count("pricing") && j["pricing"].is_object()) {
+            for (auto it = j["pricing"].begin(); it != j["pricing"].end(); ++it) {
+                try {
+                    double p = -1, c = -1;
+                    if (it.value().is_object()) {
+                        if (it.value().count("prompt")) p = json_price_to_per_mtok(it.value()["prompt"]);
+                        if (it.value().count("completion")) c = json_price_to_per_mtok(it.value()["completion"]);
+                    }
+                    if (p >= 0 && c >= 0) MODEL_PRICING_LIVE[it.key()] = {p, c};
+                } catch (...) {}
+            }
+        }
         return true;
     } catch (...) {
         return false;
     }
+}
+
+static double json_price_to_per_mtok(const json& v) {
+    // Accept: 0.26 meaning $/MTok, or micro-prices; prefer explicit object fields.
+    try {
+        if (v.is_number()) return v.get<double>();
+        if (v.is_string()) return std::stod(v.get<std::string>());
+    } catch (...) {}
+    return -1.0;
+}
+
+static void extract_pricing_from_model_obj(const json& m, const std::string& id) {
+    if (id.empty() || !m.is_object()) return;
+    double p = -1, c = -1;
+    if (m.count("pricing") && m["pricing"].is_object()) {
+        const auto& pr = m["pricing"];
+        if (pr.count("prompt")) p = json_price_to_per_mtok(pr["prompt"]);
+        if (pr.count("completion")) c = json_price_to_per_mtok(pr["completion"]);
+        if (pr.count("input")) p = json_price_to_per_mtok(pr["input"]);
+        if (pr.count("output")) c = json_price_to_per_mtok(pr["output"]);
+    }
+    if (p < 0 && m.count("prompt_price")) p = json_price_to_per_mtok(m["prompt_price"]);
+    if (c < 0 && m.count("completion_price")) c = json_price_to_per_mtok(m["completion_price"]);
+    // Some APIs give price per token; if values look tiny, scale to 1M
+    if (p > 0 && p < 0.0001) p *= 1000000.0;
+    if (c > 0 && c < 0.0001) c *= 1000000.0;
+    if (p >= 0 && c >= 0)
+        MODEL_PRICING_LIVE[id] = {p, c};
 }
 
 static std::vector<std::string> parse_models_json(const std::string& body) {
@@ -1719,6 +2035,7 @@ static std::vector<std::string> parse_models_json(const std::string& body) {
         else if (m.is_object()) {
             if (m.count("id") && m["id"].is_string()) id = m["id"].get<std::string>();
             else if (m.count("name") && m["name"].is_string()) id = m["name"].get<std::string>();
+            extract_pricing_from_model_obj(m, id);
         }
         if (!id.empty()) models.push_back(id);
     }
@@ -1726,6 +2043,10 @@ static std::vector<std::string> parse_models_json(const std::string& body) {
     std::unordered_set<std::string> seen;
     for (auto& id : models) {
         if (!seen.count(id)) { seen.insert(id); uniq.push_back(id); }
+    }
+    // C3: hard cap in-memory list to protect low-RAM hosts
+    if (uniq.size() > (size_t)MODELS_MAX_CACHE) {
+        uniq.resize((size_t)MODELS_MAX_CACHE);
     }
     return uniq;
 }
@@ -1756,7 +2077,8 @@ static bool refresh_models_from_api(bool force, bool quiet = false) {
     headers = curl_slist_append(headers, auth.c_str());
     headers = curl_slist_append(headers, "Content-Type: application/json");
 
-    curl_easy_setopt(curl, CURLOPT_URL, "https://api.302.ai/v1/models");
+    std::string models_url = normalize_api_base(G.api_base) + "/v1/models";
+    curl_easy_setopt(curl, CURLOPT_URL, models_url.c_str());
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response_body);
@@ -1810,47 +2132,100 @@ static bool refresh_models_from_api(bool force, bool quiet = false) {
     }
 }
 
+static void print_models_list(const std::vector<std::string>& list,
+                              bool show_header = true,
+                              int page = 1,
+                              const std::string& filter = "") {
+    if (show_header) {
+        std::cout << C_YELLOW << "\n[ models ]" << C_RESET;
+        if (!filter.empty())
+            std::cout << C_GRAY << " filter="" << filter << """ << C_RESET;
+        std::cout << "\n";
+    }
+    if (list.empty()) {
+        std::cout << C_GRAY << "  (пусто)" << C_RESET << std::endl;
+        return;
+    }
+    int page_sz = MODELS_PAGE_SIZE;
+    int total = (int)list.size();
+    int pages = (total + page_sz - 1) / page_sz;
+    if (page < 1) page = 1;
+    if (page > pages) page = pages;
+    int start = (page - 1) * page_sz;
+    int end = std::min(total, start + page_sz);
+    for (int i = start; i < end; ++i) {
+        bool is_current = (list[i] == G.model);
+        if (is_current) std::cout << C_GREEN << C_BOLD;
+        else std::cout << C_CYAN;
+        printf("  %2d) %s", i + 1, list[i].c_str());
+        if (is_current) std::cout << "  <-- current";
+        if (MODEL_PRICING_LIVE.count(list[i])) {
+            auto pr = MODEL_PRICING_LIVE[list[i]];
+            printf("  [$%.3g/$%.3g]", pr.first, pr.second);
+        }
+        std::cout << C_RESET << "\n";
+    }
+    std::cout << C_GRAY << "  shown: " << (end - start) << "/" << total
+              << " | page " << page << "/" << pages
+              << " | mem_cap " << MODELS_MAX_CACHE
+              << " | cache: " << MODELS_CACHE_FILE << C_RESET << std::endl;
+    if (pages > 1)
+        std::cout << C_GRAY << "  next: /models " << (filter.empty() ? std::string("") : filter + " ")
+                  << "p" << (page < pages ? page + 1 : 1)
+                  << "  (or /models refresh)" << C_RESET << std::endl;
+}
+
 static void print_models_list(bool show_header = true) {
     if (AVAILABLE_MODELS.empty())
         AVAILABLE_MODELS = DEFAULT_MODELS;
-    if (show_header) {
-        std::cout << C_YELLOW << "\n[ models ]" << C_RESET << "\n";
-    }
-    for (size_t i = 0; i < AVAILABLE_MODELS.size(); ++i) {
-        bool is_current = (AVAILABLE_MODELS[i] == G.model);
-        if (is_current) std::cout << C_GREEN << C_BOLD;
-        else std::cout << C_CYAN;
-        printf("  %2zu) %s", i + 1, AVAILABLE_MODELS[i].c_str());
-        if (is_current) std::cout << "  <-- current";
-        std::cout << C_RESET << "\n";
-    }
-    std::cout << C_GRAY << "  total: " << AVAILABLE_MODELS.size()
-              << " | cache: " << MODELS_CACHE_FILE << C_RESET << std::endl;
+    print_models_list(AVAILABLE_MODELS, show_header, 1, "");
 }
 
 static void cmd_models(const std::string& arg) {
     std::string a = arg;
-    while (!a.empty() && a[0] == " "[0]) a.erase(0, 1);
-    if (a == "refresh" || a == "live" || a == "update" || a == "force") {
-        refresh_models_from_api(true, false);
-        print_models_list(true);
-        return;
+    while (!a.empty() && a[0] == ' ') a.erase(0, 1);
+    while (!a.empty() && a.back() == ' ') a.pop_back();
+
+    // tokens: refresh|cache|pN|filter words
+    std::string filter;
+    int page = 1;
+    bool do_refresh = false, do_cache = false;
+    {
+        std::istringstream ss(a);
+        std::string tok;
+        while (ss >> tok) {
+            std::string tl = to_lower_copy(tok);
+            if (tl == "refresh" || tl == "live" || tl == "update" || tl == "force") do_refresh = true;
+            else if (tl == "cache") do_cache = true;
+            else if (tl.size() >= 2 && (tl[0] == 'p' || tl[0] == 'P') && std::isdigit((unsigned char)tl[1])) {
+                try { page = std::stoi(tl.substr(1)); } catch (...) {}
+            } else if (tl == "page" || tl == "pg") {
+                std::string n; if (ss >> n) { try { page = std::stoi(n); } catch (...) {} }
+            } else {
+                if (!filter.empty()) filter += " ";
+                filter += tok;
+            }
+        }
     }
-    if (a == "cache") {
+
+    if (do_refresh) {
+        refresh_models_from_api(true, false);
+    } else if (do_cache) {
         if (!load_models_cache()) {
             std::cout << C_YELLOW << "[models] empty cache, using defaults" << C_RESET << std::endl;
             AVAILABLE_MODELS = DEFAULT_MODELS;
         } else {
             std::cout << C_GRAY << "[models] from cache" << C_RESET << std::endl;
         }
-        print_models_list(true);
-        return;
+    } else {
+        if (!load_models_cache())
+            refresh_models_from_api(true, false);
     }
-    if (!load_models_cache())
-        refresh_models_from_api(true, false);
     if (AVAILABLE_MODELS.empty())
         AVAILABLE_MODELS = DEFAULT_MODELS;
-    print_models_list(true);
+
+    auto list = filter_models(filter);
+    print_models_list(list, true, page, filter);
 }
 
 
@@ -1881,7 +2256,24 @@ char *rl_choice = readline(C_YELLOW "[Номер модели или Enter дл�
     }
 }
 
-void print_help() {
+void print_help(bool full = false) {
+    // D7: short by default, /help all for full
+    if (!full) {
+        std::cout << C_YELLOW
+            << "Команды (кратко):\n"
+            << "  /help all          — полная справка\n"
+            << "  /model /models     — модель; /models [filter] [pN] [refresh]\n"
+            << "  /apibase [url]     — API base (E3)\n"
+            << "  /temp /maxtokens   — параметры генерации\n"
+            << "  /file /save /load /history /clear /delete /retry\n"
+            << "  /autorun /nores /compact /tokens /cost /balance\n"
+            << "  /new /list /switch /alias /search /export\n"
+            << "  /update /about /exit\n"
+            << "\nВвод: Enter/ '//' отправить | '.' пустая строка | Ctrl+C прервать запрос\n"
+            << "Pipe: echo msg | sw_chat   |  sw_chat --exec  (D9 bash в pipe)\n"
+            << C_RESET;
+        return;
+    }
     std::cout << C_YELLOW
         << "Специальные команды:\n"
         << "  /save              — сохранить историю\n"
@@ -1892,7 +2284,8 @@ void print_help() {
         << "  /retry             — повторить последний запрос\n"
         << "  /tokens            — показать использование токенов\n"
         << "  /model [name|N]    — выбор модели из списка / по имени / по номеру\n"
-        << "  /models [refresh]  - list models (cache/API 302.ai)\n"
+        << "  /models [filter] [pN|page N] [refresh|cache] — список/фильтр/страницы\n"
+        << "  /apibase [url]     — показать/задать API base (default 302.ai)\n"
         << "  /temp [0.0-2.0]    — показать/сменить температуру\n"
         << "  /maxtokens [N]     — показать/сменить max_tokens\n"
         << "  /system            — показать системный промпт\n"
@@ -1900,9 +2293,9 @@ void print_help() {
         << "  /autorun           — вкл/выкл авто-выполнение bash\n"
         << "  /nores             — вкл/выкл вывод результатов bash\n"
         << "  /compact           — тихий режим (plain, без подсказок/spinner)\n"
-        << "  /cost              — стоимость токенов в $\n"
+        << "  /cost [live]       — стоимость токенов ($); live — подтянуть цены API\n"
         << "  /balance           — ключ/провайдер и токены сессии\n"
-        << "  /update            — обновление программы\n"
+        << "  /update            — обновление программы (+ preview изменений)\n"
         << "  /about             — информация о программе\n"
         << "  /new [name]        — создать новую сессию\n"
         << "  /list              — список сессий\n"
@@ -1910,14 +2303,17 @@ void print_help() {
         << "  /alias k=v         — создать/удалить/показать алиасы\n"
         << "  /search <text>     — поиск по истории\n"
         << "  /export [fmt] [f]  — экспорт диалога (md/txt/json)\n"
-        << "  /help              — эта справка\n"
+        << "  /help [all]        — краткая / полная справка\n"
         << "  /exit              — выход\n"
         << "\nМногострочный ввод:\n"
         << "  Пустой Enter      — отправить сообщение\n"
         << "  //                 — отправить сообщение (конец ввода)\n"
         << "  .                  — вставить пустую строку\n"
+        << "\nPipe / args:\n"
+        << "  sw_chat --exec ... — выполнить bash-блоки из ответа (D9)\n"
         << "\nВо время получения ответа:\n"
-        << "  Ctrl+C             — прервать вывод ответа\n"
+        << "  Ctrl+C             — прервать запрос\n"
+        << "  bash chain N/7     — индикатор цепочки команд (D8)\n"
         << C_RESET;
 }
 
@@ -1925,8 +2321,12 @@ void print_history() {
     std::cout << C_YELLOW << "[История диалога (" << G.messages.size()
               << " сообщений)]:" << C_RESET << std::endl;
     for (size_t i = 0; i < G.messages.size(); ++i) {
-        std::string role = G.messages[i]["role"];
-        std::string cont = G.messages[i]["content"];
+        std::string role = G.messages[i].value("role", std::string("?"));
+        std::string cont;
+        if (G.messages[i].count("content") && G.messages[i]["content"].is_string())
+            cont = G.messages[i]["content"].get<std::string>();
+        else if (G.messages[i].count("content"))
+            cont = G.messages[i]["content"].dump();
         if (cont.size() > 120) cont = cont.substr(0, 120) + "...";
         if (role == "system")
             std::cout << C_MAGENTA << "[" << i << "] system: "    << C_RESET << cont << "\n";
@@ -1958,7 +2358,7 @@ void cmd_delete(const std::string &arg) {
             std::cerr << C_RED << "[Неверный индекс: " << idx << "]" << C_RESET << std::endl;
             return;
         }
-        if (G.messages[idx]["role"] == "system") {
+        if (G.messages[idx].value("role", "") == "system") {
             std::cerr << C_RED << "[Нельзя удалить системный промпт]" << C_RESET << std::endl;
             return;
         }
@@ -2000,6 +2400,20 @@ void cmd_file(const std::string &arg) {
     if (!path.empty() && path[0] == '~') {
         path = get_home_dir() + path.substr(1);
     }
+    struct stat st{};
+    if (stat(path.c_str(), &st) != 0) {
+        std::cerr << C_RED << "[Не удалось открыть файл: " << path << "]" << C_RESET << std::endl;
+        return;
+    }
+    if (!S_ISREG(st.st_mode)) {
+        std::cerr << C_RED << "[Не обычный файл: " << path << "]" << C_RESET << std::endl;
+        return;
+    }
+    if (st.st_size > (off_t)MAX_FILE_BYTES) {
+        std::cerr << C_RED << "[Файл слишком большой: " << st.st_size
+                  << " байт (лимит " << MAX_FILE_BYTES << ")]" << C_RESET << std::endl;
+        return;
+    }
     std::ifstream f(path);
     if (!f.is_open()) {
         std::cerr << C_RED << "[Не удалось открыть файл: " << path << "]" << C_RESET << std::endl;
@@ -2010,6 +2424,14 @@ void cmd_file(const std::string &arg) {
     if (content.empty()) {
         std::cerr << C_RED << "[Файл пуст: " << path << "]" << C_RESET << std::endl;
         return;
+    }
+    if (content.size() > (size_t)MAX_FILE_BYTES) {
+        content = content.substr(0, (size_t)MAX_FILE_BYTES);
+        size_t cut = content.size();
+        while (cut > 0 && (content[cut-1] & 0xC0) == 0x80) --cut;
+        content.resize(cut);
+        content += "\n[...файл обрезан по лимиту " + std::to_string(MAX_FILE_BYTES) + " байт...]";
+        std::cout << C_YELLOW << "[Файл обрезан до " << MAX_FILE_BYTES << " байт]" << C_RESET << std::endl;
     }
     // Определяем расширение для подсветки
     std::string ext;
@@ -2059,6 +2481,8 @@ static const ModelPricing KNOWN_PRICING[] = {
     {"x-ai/grok-3-mini",                0.3,    0.5},
     {"deepseek/deepseek-r1",            0.7,    2.5},
     {"deepseek/deepseek-chat",          0.26,  0.38},
+    {"deepseek-chat",                   0.26,  0.38},
+    {"deepseek-reasoner",               0.55,  2.19},
     {"deepseek/deepseek-v4-pro",        0.435, 0.87},
     {"qwen/qwen3",                      0.39,  2.34},
     {"meta-llama/llama-4",              0.15,   0.6},
@@ -2070,36 +2494,70 @@ static const ModelPricing KNOWN_PRICING[] = {
     {nullptr, 0, 0}
 };
 
-void print_cost() {
+void print_cost(bool live = false) {
+    if (live) {
+        std::cout << C_YELLOW << "[cost] refresh models/pricing from API..." << C_RESET << std::endl;
+        refresh_models_from_api(true, false);
+    } else if (MODEL_PRICING_LIVE.empty()) {
+        load_models_cache(); // may fill pricing from cache
+    }
+
     double p_price = 0, c_price = 0;
     bool found = false;
-    for (int i = 0; KNOWN_PRICING[i].model_prefix != nullptr; ++i) {
-        if (G.model.find(KNOWN_PRICING[i].model_prefix) == 0) {
-            p_price = KNOWN_PRICING[i].prompt_per_mtok;
-            c_price = KNOWN_PRICING[i].completion_per_mtok;
-            found = true;
-            break;
+    std::string price_src;
+
+    // 1) live map exact / substring
+    if (MODEL_PRICING_LIVE.count(G.model)) {
+        p_price = MODEL_PRICING_LIVE[G.model].first;
+        c_price = MODEL_PRICING_LIVE[G.model].second;
+        found = true;
+        price_src = "api/cache";
+    } else {
+        for (auto& kv : MODEL_PRICING_LIVE) {
+            if (G.model.find(kv.first) != std::string::npos || kv.first.find(G.model) != std::string::npos) {
+                p_price = kv.second.first; c_price = kv.second.second;
+                found = true; price_src = "api/cache~" + kv.first;
+                break;
+            }
         }
     }
+    // 2) static table
+    if (!found) {
+        for (int i = 0; KNOWN_PRICING[i].model_prefix != nullptr; ++i) {
+            if (G.model.find(KNOWN_PRICING[i].model_prefix) == 0 ||
+                std::string(KNOWN_PRICING[i].model_prefix).find(G.model) != std::string::npos ||
+                G.model == KNOWN_PRICING[i].model_prefix) {
+                p_price = KNOWN_PRICING[i].prompt_per_mtok;
+                c_price = KNOWN_PRICING[i].completion_per_mtok;
+                found = true;
+                price_src = "builtin";
+                break;
+            }
+        }
+    }
+
     double prompt_cost = (G.total_prompt_tokens / 1000000.0) * p_price;
     double completion_cost = (G.total_completion_tokens / 1000000.0) * c_price;
     double total_cost = prompt_cost + completion_cost;
     int total_tokens = G.total_prompt_tokens + G.total_completion_tokens;
+    size_t est_now = approx_tokens_messages();
 
     std::cout << C_MAGENTA << "\n  Использование токенов" << C_RESET << "\n";
     std::cout << C_GRAY << "  ────────────────────────────────" << C_RESET << "\n";
     std::cout << C_MAGENTA << "  Модель:\t" << C_RESET << G.model << "\n";
+    std::cout << C_MAGENTA << "  API:\t\t" << C_RESET << normalize_api_base(G.api_base) << "\n";
     std::cout << C_MAGENTA << "  Промпт:\t" << C_RESET << G.total_prompt_tokens << " токенов\n";
     std::cout << C_MAGENTA << "  Ответы:\t" << C_RESET << G.total_completion_tokens << " токенов\n";
     std::cout << C_MAGENTA << "  Всего:\t" << C_RESET << total_tokens << " токенов\n";
+    std::cout << C_MAGENTA << "  Контекст:~\t" << C_RESET << est_now << " tok (est chars/4)\n";
     if (found) {
         std::cout << C_GRAY << "  ────────────────────────────────" << C_RESET << "\n";
         printf("  Промпт:\t$%.4f\n", prompt_cost);
         printf("  Ответы:\t$%.4f\n", completion_cost);
         printf("  Итого:\t$%.4f\n", total_cost);
-        printf("  ($%.2f/$%.2f за 1M токенов)\n", p_price, c_price);
+        printf("  ($%.4g/$%.4g за 1M токенов, src=%s)\n", p_price, c_price, price_src.c_str());
     } else {
-        std::cout << C_GRAY << "\n  Цены для модели не найдены" << C_RESET << "\n";
+        std::cout << C_GRAY << "\n  Цены для модели не найдены. Попробуйте: /cost live" << C_RESET << "\n";
     }
     std::cout << std::endl;
 }
@@ -2125,9 +2583,7 @@ static bool get_user_input(std::string &out) {
             // EOF (Ctrl+D)
             if (!result.empty()) {
                 out = result;
-                if (G.history_enabled) add_history(result.size() <= 500
-                    ? result.c_str()
-                    : (result.substr(0, 500) + "...").c_str());
+                if (G.history_enabled) add_history(history_oneline(result).c_str());
                 return true;
             }
             return false;
@@ -2183,8 +2639,7 @@ static bool get_user_input(std::string &out) {
 
     if (!result.empty()) {
         if (G.history_enabled) {
-            std::string hist = result.size() > 500 ? result.substr(0, 500) + "..." : result;
-            add_history(hist.c_str());
+            add_history(history_oneline(result).c_str());
         }
     }
 
@@ -2251,9 +2706,13 @@ int main(int argc, char *argv[]) {
 
     // ── Режим пайпа / аргументов ──
     bool pipe_mode = !isatty(fileno(stdin));
+    bool exec_mode = false; // D9: run bash blocks from response
     int real_args = 0;
     for (int i = 1; i < argc; i++) {
-        if (std::string(argv[i]) != "--restore-session") real_args++;
+        std::string a = argv[i];
+        if (a == "--restore-session") continue;
+        if (a == "--exec" || a == "-e") { exec_mode = true; continue; }
+        real_args++;
     }
     bool has_args  = real_args > 0;
 
@@ -2261,8 +2720,10 @@ int main(int argc, char *argv[]) {
         std::string message;
         if (has_args) {
             for (int i = 1; i < argc; ++i) {
-                if (i > 1) message += " ";
-                message += argv[i];
+                std::string a = argv[i];
+                if (a == "--restore-session" || a == "--exec" || a == "-e") continue;
+                if (!message.empty()) message += " ";
+                message += a;
             }
         }
         if (pipe_mode) {
@@ -2281,7 +2742,9 @@ int main(int argc, char *argv[]) {
             curl_global_cleanup();
             return 1;
         }
-        G.messages.push_back({{"role", "user"}, {"content", message}});
+        // In non-tty exec mode default compact-ish confirmations still apply unless autorun
+        G.messages.push_back({{"role", "user"}, {"content", clamp_message_content(message)}});
+        size_t msgs_before = G.messages.size() - 1;
         bool aborted = false;
         std::string content;
         try {
@@ -2294,7 +2757,12 @@ int main(int argc, char *argv[]) {
             content = "";
         }
         if (!content.empty()) {
-            print_assistant_text(content, false);
+            if (exec_mode) {
+                // D9: full bash pipeline processing
+                process_response(content, aborted, msgs_before);
+            } else {
+                print_assistant_text(content, false);
+            }
         }
         curl_global_cleanup();
         return 0;
@@ -2308,8 +2776,9 @@ int main(int argc, char *argv[]) {
     std::cout << C_BOLD << C_CYAN << "=== Chat CLI ===" << C_RESET << std::endl;
     std::cout << C_YELLOW << "Модель: " << G.model << C_RESET << std::endl;
     std::cout << C_YELLOW << "Введите /help для справки" << C_RESET << std::endl;
-    std::cout << C_GRAY   << "Autorun: " << (G.autorun ? "вкл" : "выкл")
-              << " (переключить: /autorun)" << C_RESET
+    std::cout << C_GRAY   << "Autorun: " << C_RESET
+              << (G.autorun ? C_RED "ВКЛ ⚠" : C_GRAY "выкл") << C_RESET
+              << C_GRAY << " (переключить: /autorun)" << C_RESET
               << C_GRAY << " Вывод результатов: " << (G.nores ? C_RED "выкл" : C_GREEN "вкл")
               << C_RESET;
     std::cout << C_GRAY   << " История: " << (G.history_enabled ? "вкл" : "выкл")
@@ -2334,7 +2803,11 @@ int main(int argc, char *argv[]) {
         if (userAnswer.empty()) continue;
 
         // ── Специальные команды ──
-        if (userAnswer == "/help")    { print_help();    continue; }
+        if (match_command(userAnswer, "/help")) {
+            std::string ha = command_arg(userAnswer, "/help");
+            print_help(ha == "all" || ha == "full" || ha == "a");
+            continue;
+        }
         if (userAnswer == "/save") {
             if (!G.history_enabled) {
                 std::cout << C_YELLOW << "[История отключена. Включите: /history on]" << C_RESET << std::endl;
@@ -2367,7 +2840,24 @@ int main(int argc, char *argv[]) {
             continue;
         }
         if (userAnswer == "/tokens")  { print_tokens();  continue; }
-        if (userAnswer == "/cost")    { print_cost();    continue; }
+        if (match_command(userAnswer, "/cost")) {
+            std::string ca = command_arg(userAnswer, "/cost");
+            print_cost(ca == "live" || ca == "refresh" || ca == "api");
+            continue;
+        }
+        if (match_command(userAnswer, "/apibase")) {
+            std::string a = command_arg(userAnswer, "/apibase");
+            while (!a.empty() && a[0] == ' ') a.erase(0, 1);
+            if (a.empty()) {
+                std::cout << C_YELLOW << "[api_base: " << normalize_api_base(G.api_base)
+                          << "]" << C_RESET << std::endl;
+            } else {
+                G.api_base = normalize_api_base(a);
+                save_config();
+                std::cout << C_GREEN << "[api_base: " << G.api_base << "]" << C_RESET << std::endl;
+            }
+            continue;
+        }
         if (userAnswer == "/nores") {
             G.nores = !G.nores;
             save_config();
@@ -2384,9 +2874,16 @@ int main(int argc, char *argv[]) {
         if (userAnswer == "/autorun") {
             G.autorun = !G.autorun;
             save_config();
-            std::cout << C_YELLOW << "[Autorun: "
-                      << (G.autorun ? "ВКЛЮЧЁН ⚡" : "выключен")
-                      << "]" << C_RESET << std::endl;
+            if (G.autorun) {
+                std::cout << C_RED << C_BOLD
+                          << "[Autorun: ВКЛЮЧЁН ⚠ bash-блоки выполняются без подтверждения!]"
+                          << C_RESET << std::endl;
+                std::cout << C_YELLOW
+                          << "[Опасно на системе с ключами/почтой. Выключить: /autorun]"
+                          << C_RESET << std::endl;
+            } else {
+                std::cout << C_YELLOW << "[Autorun: выключен]" << C_RESET << std::endl;
+            }
             continue;
         }
         if (userAnswer == "/update")  { cmd_update();  continue; }
@@ -2437,7 +2934,7 @@ int main(int argc, char *argv[]) {
         if (userAnswer == "/retry") {
             int last_assistant = -1;
             for (int i = (int)G.messages.size() - 1; i >= 0; --i) {
-                if (G.messages[i]["role"] == "assistant") {
+                if (G.messages[i].value("role", "") == "assistant") {
                     last_assistant = i;
                     break;
                 }
@@ -2445,7 +2942,7 @@ int main(int argc, char *argv[]) {
             if (last_assistant > 0) {
                 int user_before = -1;
                 for (int i = last_assistant - 1; i >= 0; --i) {
-                    if (G.messages[i]["role"] == "user") {
+                    if (G.messages[i].value("role", "") == "user") {
                         user_before = i;
                         break;
                     }
@@ -2553,7 +3050,7 @@ int main(int argc, char *argv[]) {
                       << ". Введите /help]" << C_RESET << std::endl;
             continue;
         } else {
-            G.messages.push_back({{"role", "user"}, {"content", userAnswer}});
+            G.messages.push_back({{"role", "user"}, {"content", clamp_message_content(userAnswer)}});
         }
 
         // ── API запрос ──
@@ -2573,7 +3070,11 @@ int main(int argc, char *argv[]) {
         if (g_exit_requested) do_exit();
 
         process_response(content, aborted, msgs_before);
-        if (G.history_enabled) save_history(true);
+        // process_response already autosaves; extra silent save every N msgs
+        if (G.history_enabled && G.messages.size() > 2 &&
+            (G.messages.size() % HISTORY_SAVE_EVERY == 0)) {
+            save_history(true);
+        }
     }
 
     curl_global_cleanup();
