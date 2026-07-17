@@ -28,7 +28,7 @@
 
 using json = nlohmann::json;
 // ─────────────────────────── Версия ───────────────────────────
-#define APP_VERSION "1.0.39"
+#define APP_VERSION "1.0.40"
 
 
 // Emoji_Presentation: всегда отображается как emoji (ширина 2)
@@ -187,7 +187,7 @@ static std::string get_home_dir() {
 #define MAX_MSG_CHARS       120000
 #define HISTORY_SAVE_EVERY  8
 #define MODELS_PAGE_SIZE    25
-#define MODELS_MAX_CACHE    400
+#define MODELS_MAX_CACHE    800
 #define RL_HIST_MAX_CHARS   2000
 #define MAX_BASH_CHAIN      7
 
@@ -262,6 +262,8 @@ static const std::vector<std::string> DEFAULT_MODELS = {
 };
 // Живой список (кэш/API); при старте = DEFAULT_MODELS
 static std::vector<std::string> AVAILABLE_MODELS = DEFAULT_MODELS;
+// Последний показанный (отфильтрованный) список — /model N берёт номера отсюда
+static std::vector<std::string> LAST_MODEL_VIEW;
 static std::string MODELS_CACHE_FILE;
 // live pricing from /v1/models when API provides it: model -> (prompt$/MTok, completion$/MTok)
 static std::unordered_map<std::string, std::pair<double,double>> MODEL_PRICING_LIVE;
@@ -1221,7 +1223,14 @@ static char** cmd_completion(const char* text, int start, int end) {
         } else if (rl_line_buffer && rl_line_buffer[0] == '/' && std::string(rl_line_buffer).rfind("/model ", 0) == 0) {
             // Проверка доступности моделей
             if (!AVAILABLE_MODELS.empty()) {
-                for (const auto& m : AVAILABLE_MODELS) if (m.rfind(t, 0) == 0) matches.push_back(m);
+                for (const auto& m : AVAILABLE_MODELS) {
+                    // to_lower_copy объявлен ниже — локальный lower здесь
+                    std::string ml = m, tl = t;
+                    for (char& c : ml) c = (char)std::tolower((unsigned char)c);
+                    for (char& c : tl) c = (char)std::tolower((unsigned char)c);
+                    if (tl.empty() || ml.find(tl) != std::string::npos) matches.push_back(m);
+                    if (matches.size() > 40) break;
+                }
             }
         }
     } catch (...) {
@@ -1288,15 +1297,102 @@ static std::string to_lower_copy(std::string s) {
 }
 
 // C3/D4: filter + paginate models list
+// a-b/c_d -> "a b c d" чтобы /models claude sonnet находил id с дефисами
+static std::string model_id_search_key(const std::string& id) {
+    std::string o;
+    o.reserve(id.size() + 8);
+    for (unsigned char c : id) {
+        char ch = (char)std::tolower(c);
+        if (ch == '-' || ch == '_' || ch == '/' || ch == '.' || ch == ':') o.push_back(' ');
+        else o.push_back(ch);
+    }
+    return o;
+}
+
+// Пусто = все. Несколько слов = AND. В токене a|b|c = OR.
 static std::vector<std::string> filter_models(const std::string& filt) {
     if (filt.empty()) return AVAILABLE_MODELS;
-    std::string f = to_lower_copy(filt);
+    std::vector<std::string> tokens;
+    {
+        std::istringstream ss(filt);
+        std::string t;
+        while (ss >> t) {
+            std::string tl = to_lower_copy(t);
+            if (!tl.empty()) tokens.push_back(tl);
+        }
+    }
+    if (tokens.empty()) return AVAILABLE_MODELS;
+
     std::vector<std::string> out;
+    out.reserve(AVAILABLE_MODELS.size() / 4 + 8);
     for (auto& m : AVAILABLE_MODELS) {
         std::string ml = to_lower_copy(m);
-        if (ml.find(f) != std::string::npos) out.push_back(m);
+        std::string mk = model_id_search_key(m);
+        bool ok = true;
+        for (auto& tok : tokens) {
+            bool any = false;
+            if (tok.find('|') != std::string::npos) {
+                size_t start = 0;
+                while (start <= tok.size()) {
+                    size_t bar = tok.find('|', start);
+                    std::string alt = (bar == std::string::npos)
+                        ? tok.substr(start)
+                        : tok.substr(start, bar - start);
+                    start = (bar == std::string::npos) ? tok.size() + 1 : bar + 1;
+                    if (alt.empty()) continue;
+                    if (ml.find(alt) != std::string::npos || mk.find(alt) != std::string::npos) {
+                        any = true;
+                        break;
+                    }
+                }
+            } else {
+                any = (ml.find(tok) != std::string::npos || mk.find(tok) != std::string::npos);
+            }
+            if (!any) { ok = false; break; }
+        }
+        if (ok) out.push_back(m);
     }
     return out;
+}
+
+// /model arg: exact | N из LAST_MODEL_VIEW | unique filter
+// return: 1 ok, 0 fail, 2 ambiguous (LAST_MODEL_VIEW filled)
+static int resolve_model_arg(const std::string& arg, std::string& resolved, std::string& err) {
+    resolved.clear(); err.clear();
+    if (arg.empty()) { err = "пусто"; return -1; }
+    for (auto& m : AVAILABLE_MODELS)
+        if (m == arg) { resolved = m; return 1; }
+    try {
+        size_t pos = 0;
+        int idx = std::stoi(arg, &pos);
+        if (pos == arg.size() && idx >= 1) {
+            const auto& view = !LAST_MODEL_VIEW.empty() ? LAST_MODEL_VIEW : AVAILABLE_MODELS;
+            if (idx <= (int)view.size()) {
+                resolved = view[idx - 1];
+                return 1;
+            }
+            err = "номер вне списка (1.." + std::to_string((int)view.size()) + ")";
+            return 0;
+        }
+    } catch (...) {}
+    std::string al = to_lower_copy(arg);
+    for (auto& m : AVAILABLE_MODELS)
+        if (to_lower_copy(m) == al) { resolved = m; return 1; }
+    auto hits = filter_models(arg);
+    if (hits.size() == 1) { resolved = hits[0]; return 1; }
+    if (hits.empty()) {
+        std::vector<std::string> pref;
+        for (auto& m : AVAILABLE_MODELS)
+            if (to_lower_copy(m).rfind(al, 0) == 0) pref.push_back(m);
+        if (pref.size() == 1) { resolved = pref[0]; return 1; }
+        if (pref.empty()) { err = "не найдено: " + arg; return 0; }
+        LAST_MODEL_VIEW = pref;
+        err = "несколько совпадений (" + std::to_string((int)pref.size()) + "), уточните";
+        return 2;
+    }
+    LAST_MODEL_VIEW = hits;
+    err = "несколько совпадений (" + std::to_string((int)hits.size()) + "), уточните номер или фильтр";
+    return 2;
 }
 
 // Индикатор заполнения контекста: цветной бар [██████░░░░] NN% + число сообщений.
@@ -2136,19 +2232,22 @@ static void print_models_list(const std::vector<std::string>& list,
                               bool show_header = true,
                               int page = 1,
                               const std::string& filter = "") {
+    // /model N использует полный отфильтрованный список (не только текущую страницу)
+    LAST_MODEL_VIEW = list;
     if (show_header) {
         std::cout << C_YELLOW << "\n[ models ]" << C_RESET;
         if (!filter.empty())
-            std::cout << C_GRAY << " filter="" << filter << """ << C_RESET;
+            std::cout << C_GRAY << " filter=\"" << filter << "\"" << C_RESET;
         std::cout << "\n";
     }
     if (list.empty()) {
-        std::cout << C_GRAY << "  (пусто)" << C_RESET << std::endl;
+        std::cout << C_GRAY << "  (пусто — смените фильтр или /models refresh)" << C_RESET << std::endl;
         return;
     }
     int page_sz = MODELS_PAGE_SIZE;
     int total = (int)list.size();
     int pages = (total + page_sz - 1) / page_sz;
+    if (pages < 1) pages = 1;
     if (page < 1) page = 1;
     if (page > pages) page = pages;
     int start = (page - 1) * page_sz;
@@ -2157,7 +2256,7 @@ static void print_models_list(const std::vector<std::string>& list,
         bool is_current = (list[i] == G.model);
         if (is_current) std::cout << C_GREEN << C_BOLD;
         else std::cout << C_CYAN;
-        printf("  %2d) %s", i + 1, list[i].c_str());
+        printf("  %3d) %s", i + 1, list[i].c_str());
         if (is_current) std::cout << "  <-- current";
         if (MODEL_PRICING_LIVE.count(list[i])) {
             auto pr = MODEL_PRICING_LIVE[list[i]];
@@ -2167,12 +2266,24 @@ static void print_models_list(const std::vector<std::string>& list,
     }
     std::cout << C_GRAY << "  shown: " << (end - start) << "/" << total
               << " | page " << page << "/" << pages
-              << " | mem_cap " << MODELS_MAX_CACHE
+              << " | all_in_mem " << AVAILABLE_MODELS.size()
+              << "/" << MODELS_MAX_CACHE
               << " | cache: " << MODELS_CACHE_FILE << C_RESET << std::endl;
-    if (pages > 1)
-        std::cout << C_GRAY << "  next: /models " << (filter.empty() ? std::string("") : filter + " ")
-                  << "p" << (page < pages ? page + 1 : 1)
-                  << "  (or /models refresh)" << C_RESET << std::endl;
+    if ((int)AVAILABLE_MODELS.size() >= MODELS_MAX_CACHE)
+        std::cout << C_YELLOW << "  [!] список обрезан cap=" << MODELS_MAX_CACHE
+                  << " — уточните фильтр и /models refresh" << C_RESET << std::endl;
+    std::cout << C_GRAY << "  выбрать: /model N  |  /model подстрока  |  /models слово1 слово2"
+              << C_RESET << std::endl;
+    if (pages > 1) {
+        std::cout << C_GRAY << "  страницы: /models "
+                  << (filter.empty() ? std::string("") : filter + " ")
+                  << "p" << (page < pages ? page + 1 : 1);
+        if (page > 1)
+            std::cout << "  |  /models "
+                      << (filter.empty() ? std::string("") : filter + " ")
+                      << "p" << (page - 1);
+        std::cout << "  |  /models refresh" << C_RESET << std::endl;
+    }
 }
 
 static void print_models_list(bool show_header = true) {
@@ -2231,28 +2342,65 @@ static void cmd_models(const std::string& arg) {
 
 void cmd_model_select() {
     if (AVAILABLE_MODELS.empty()) {
-        if (!load_models_cache()) AVAILABLE_MODELS = DEFAULT_MODELS;
+        if (!load_models_cache())
+            refresh_models_from_api(true, false);
+        if (AVAILABLE_MODELS.empty()) AVAILABLE_MODELS = DEFAULT_MODELS;
     }
-    print_models_list(true);
-char *rl_choice = readline(C_YELLOW "[Номер модели или Enter для отмены]: " C_RESET);
-    if (!rl_choice) return;
-    std::string choice(rl_choice);
-    free(rl_choice);
-    if (choice.empty()) return;
-    try {
-        int idx = std::stoi(choice);
-        if (idx >= 1 && idx <= (int)AVAILABLE_MODELS.size()) {
-            G.model = AVAILABLE_MODELS[idx - 1];
+    std::string filter;
+    int page = 1;
+    for (int step = 0; step < 8; ++step) {
+        auto list = filter_models(filter);
+        print_models_list(list, true, page, filter);
+        std::cout << C_GRAY << "  сейчас: " << G.model << C_RESET << std::endl;
+        char *rl_choice = readline(
+            C_YELLOW "[N=номер | текст=фильтр | pN=страница | Enter=отмена]: " C_RESET);
+        if (!rl_choice) return;
+        std::string choice(rl_choice);
+        free(rl_choice);
+        while (!choice.empty() && (choice[0]==' '||choice[0]=='\t')) choice.erase(0,1);
+        while (!choice.empty() && (choice.back()==' '||choice.back()=='\t')) choice.pop_back();
+        if (choice.empty()) return;
+
+        std::string cl = to_lower_copy(choice);
+        if (cl.size() >= 2 && cl[0]=='p' && std::isdigit((unsigned char)cl[1])) {
+            try { page = std::stoi(cl.substr(1)); } catch (...) {}
+            continue;
+        }
+        if (cl.rfind("page", 0) == 0) {
+            try {
+                auto sp = choice.find_first_of(" \t");
+                if (sp != std::string::npos) page = std::stoi(choice.substr(sp + 1));
+            } catch (...) {}
+            continue;
+        }
+        bool pure_num = !choice.empty();
+        for (unsigned char c : choice) if (!std::isdigit(c)) { pure_num = false; break; }
+        if (pure_num) {
+            std::string resolved, err;
+            int rc = resolve_model_arg(choice, resolved, err);
+            if (rc == 1) {
+                G.model = resolved;
+                save_config();
+                std::cout << C_GREEN << "[Модель: " << G.model << "]" << C_RESET << std::endl;
+                return;
+            }
+            std::cerr << C_RED << "[" << err << "]" << C_RESET << std::endl;
+            continue;
+        }
+        std::string resolved, err;
+        int rc = resolve_model_arg(choice, resolved, err);
+        if (rc == 1) {
+            G.model = resolved;
             save_config();
             std::cout << C_GREEN << "[Модель: " << G.model << "]" << C_RESET << std::endl;
-        } else {
-            std::cerr << C_RED << "[Неверный номер]" << C_RESET << std::endl;
+            return;
         }
-    } catch (...) {
-        // Может быть введено имя модели напрямую
-        G.model = choice;
-        save_config();
-        std::cout << C_GREEN << "[Модель: " << G.model << "]" << C_RESET << std::endl;
+        filter = choice;
+        page = 1;
+        if (rc == 0)
+            std::cout << C_YELLOW << "[" << err << " — показан фильтр]" << C_RESET << std::endl;
+        else if (rc == 2)
+            std::cout << C_YELLOW << "[" << err << "]" << C_RESET << std::endl;
     }
 }
 
@@ -2262,7 +2410,7 @@ void print_help(bool full = false) {
         std::cout << C_YELLOW
             << "Команды (кратко):\n"
             << "  /help all          — полная справка\n"
-            << "  /model /models     — модель; /models [filter] [pN] [refresh]\n"
+            << "  /model /models     — модель; /models claude sonnet | /model N|имя\n"
             << "  /apibase [url]     — API base (E3)\n"
             << "  /temp /maxtokens   — параметры генерации\n"
             << "  /file /save /load /history /clear /delete /retry\n"
@@ -2283,8 +2431,8 @@ void print_help(bool full = false) {
         << "  /delete N          — удалить сообщение N из истории\n"
         << "  /retry             — повторить последний запрос\n"
         << "  /tokens            — показать использование токенов\n"
-        << "  /model [name|N]    — выбор модели из списка / по имени / по номеру\n"
-        << "  /models [filter] [pN|page N] [refresh|cache] — список/фильтр/страницы\n"
+        << "  /model [name|N]    — N из последнего /models; имя/фильтр; без args — меню\n"
+        << "  /models [слова…] [pN|page N] [refresh|cache] — AND-фильтр; затем /model N\n"
         << "  /apibase [url]     — показать/задать API base (default 302.ai)\n"
         << "  /temp [0.0-2.0]    — показать/сменить температуру\n"
         << "  /maxtokens [N]     — показать/сменить max_tokens\n"
@@ -2983,19 +3131,24 @@ int main(int argc, char *argv[]) {
         } else if (match_command(userAnswer, "/model")) {
             std::string arg = command_arg(userAnswer, "/model");
             if (!arg.empty()) {
-                // Проверяем — может это номер из списка
-                try {
-                    int idx = std::stoi(arg);
-                    if (idx >= 1 && idx <= (int)AVAILABLE_MODELS.size()) {
-                        G.model = AVAILABLE_MODELS[idx - 1];
-                    } else {
-                        G.model = arg;
-                    }
-                } catch (...) {
-                    G.model = arg;
+                if (AVAILABLE_MODELS.empty()) {
+                    if (!load_models_cache()) refresh_models_from_api(false, true);
+                    if (AVAILABLE_MODELS.empty()) AVAILABLE_MODELS = DEFAULT_MODELS;
                 }
-                save_config();
-                std::cout << C_GREEN << "[Модель: " << G.model << "]" << C_RESET << std::endl;
+                std::string resolved, err;
+                int rc = resolve_model_arg(arg, resolved, err);
+                if (rc == 1) {
+                    G.model = resolved;
+                    save_config();
+                    std::cout << C_GREEN << "[Модель: " << G.model << "]" << C_RESET << std::endl;
+                } else if (rc == 2) {
+                    print_models_list(LAST_MODEL_VIEW, true, 1, arg);
+                    std::cout << C_YELLOW << "[" << err << ": /model N]" << C_RESET << std::endl;
+                } else {
+                    std::cerr << C_RED << "[" << err << "]" << C_RESET << std::endl;
+                    std::cout << C_GRAY << "  подсказка: /models " << arg
+                              << "  или /models refresh" << C_RESET << std::endl;
+                }
             } else {
                 cmd_model_select();
                 save_config();
