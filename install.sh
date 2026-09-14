@@ -8,10 +8,25 @@ YELLOW='\033[1;33m'
 CYAN='\033[0;36m'
 RESET='\033[0m'
 
-REPO_URL="https://raw.githubusercontent.com/USERNAME/REPO/main"
+REPO_URL="https://raw.githubusercontent.com/swarik/Chat-Assist/main"
 INSTALL_DIR="$HOME/.local/bin"
 TMP_DIR="$(mktemp -d)"
 NLOHMANN_DIR="$HOME/.local/include/nlohmann"
+
+# Termux (Android) — определяем через $PREFIX
+IS_TERMUX=0
+if [ -n "$PREFIX" ] && [ -x "$PREFIX/bin/pkg" ]; then
+    IS_TERMUX=1
+fi
+
+# C++ компилятор: g++ если есть, иначе clang++
+CXX="${CXX:-}"
+if [ -z "$CXX" ]; then
+    if command -v g++ &>/dev/null; then CXX=g++
+    elif command -v clang++ &>/dev/null; then CXX=clang++
+    else CXX=g++
+    fi
+fi
 
 echo -e "${CYAN}=== sw_chat installer ===${RESET}"
 
@@ -34,19 +49,25 @@ detect_pkg_manager() {
 install_deps() {
     local pm="$1"
     echo -e "${YELLOW}[Устанавливаю зависимости...]${RESET}"
+    if [ "$IS_TERMUX" = "1" ]; then
+        # Termux: без sudo, имена пакетов свои; заголовки readline/curl в базовых пакетах
+        pkg install -y clang readline libcurl make
+        echo -e "${GREEN}[Зависимости (Termux) установлены]${RESET}"
+        return
+    fi
     case "$pm" in
         apt)
-            sudo apt-get update -qq
-            sudo apt-get install -y g++ libreadline-dev libcurl4-openssl-dev
+            apt-get update -qq
+            apt-get install -y g++ libreadline-dev libcurl4-openssl-dev
             ;;
         dnf)
-            sudo dnf install -y gcc-c++ readline-devel libcurl-devel
+            dnf install -y gcc-c++ readline-devel libcurl-devel
             ;;
         pacman)
-            sudo pacman -Sy --noconfirm gcc readline curl
+            pacman -Sy --noconfirm gcc readline curl
             ;;
         zypper)
-            sudo zypper install -y gcc-c++ readline-devel libcurl-devel
+            zypper install -y gcc-c++ readline-devel libcurl-devel
             ;;
         *)
             echo -e "${RED}[Неизвестный пакетный менеджер. Установите вручную: g++, libreadline-dev, libcurl-dev]${RESET}"
@@ -60,7 +81,8 @@ install_deps() {
 install_nlohmann() {
     echo -e "${YELLOW}[Устанавливаю nlohmann/json...]${RESET}"
     mkdir -p "$NLOHMANN_DIR"
-    curl -fsSL "https://raw.githubusercontent.com/nlohmann/json/develop/single_include/nlohmann/json.hpp" \
+    # Прибито к стабильному тегу — develop-ветка ломает сборки
+    curl -fsSL "https://github.com/nlohmann/json/releases/download/v3.11.3/json.hpp" \
         -o "$NLOHMANN_DIR/json.hpp"
     echo -e "${GREEN}[nlohmann/json установлен: $NLOHMANN_DIR/json.hpp]${RESET}"
 }
@@ -69,22 +91,30 @@ install_nlohmann() {
 download_source() {
     echo -e "${YELLOW}[Скачиваю sw_chat.cpp...]${RESET}"
     curl -fsSL "$REPO_URL/sw_chat.cpp" -o "$TMP_DIR/sw_chat.cpp"
-    echo -e "${GREEN}[Исходник скачан]${RESET}"
+    if [ ! -s "$TMP_DIR/sw_chat.cpp" ]; then
+        echo -e "${RED}[Файл не скачан или пуст: $REPO_URL/sw_chat.cpp]${RESET}"
+        exit 1
+    fi
+    echo -e "${GREEN}[Исходник скачан ($(wc -c < "$TMP_DIR/sw_chat.cpp") байт)]${RESET}"
 }
 
 # ─────────────────────────── Компиляция ──────────────────────
 compile() {
     echo -e "${YELLOW}[Компилирую...]${RESET}"
-    g++ -std=c++17 -O2 \
+    "$CXX" -std=c++17 -O2 \
         -I"$HOME/.local/include" \
         -o "$TMP_DIR/sw_chat" \
         "$TMP_DIR/sw_chat.cpp" \
-        -lreadline -lcurl
+        -lreadline -lcurl -lpthread
     echo -e "${GREEN}[Компиляция успешна]${RESET}"
 }
 
 # ─────────────────────────── Установка бинарника ─────────────
 install_binary() {
+    if [ ! -x "$TMP_DIR/sw_chat" ]; then
+        echo -e "${RED}[Бинарник не создан — компиляция не удалась]${RESET}"
+        exit 1
+    fi
     echo -e "${YELLOW}[Устанавливаю бинарник в $INSTALL_DIR...]${RESET}"
     mkdir -p "$INSTALL_DIR"
     cp "$TMP_DIR/sw_chat" "$INSTALL_DIR/sw_chat"
@@ -113,17 +143,17 @@ check_path() {
 
 # ─────────────────────────── API ключ ────────────────────────
 setup_api_key() {
-    if [ -z "$OPENROUTER_API_KEY" ] && [ ! -f "$HOME/.config/openrouter_key" ]; then
+    if [ -z "$302_API_KEY" ] && [ ! -f "$HOME/.config/302_key" ]; then
         echo -e "${YELLOW}[API ключ не найден]${RESET}"
-        echo -e "Получите ключ на ${CYAN}https://openrouter.ai${RESET}"
-        read -rp "Введите ваш OpenRouter API ключ (или Enter чтобы пропустить): " apikey
+        echo -e "Получите ключ на ${CYAN}https://302.ai${RESET}"
+        read -rp "Введите ваш 302.ai API ключ (или Enter чтобы пропустить): " apikey
         if [ -n "$apikey" ]; then
             mkdir -p "$HOME/.config"
-            echo "$apikey" > "$HOME/.config/openrouter_key"
-            chmod 600 "$HOME/.config/openrouter_key"
-            echo -e "${GREEN}[API ключ сохранён: ~/.config/openrouter_key]${RESET}"
+            printf "%s" "$apikey" > "$HOME/.config/302_key"
+            chmod 600 "$HOME/.config/302_key"
+            echo -e "${GREEN}[API ключ сохранён: ~/.config/302_key]${RESET}"
         else
-            echo -e "${YELLOW}[Пропущено. Сохраните ключ в ~/.config/openrouter_key или переменную OPENROUTER_API_KEY]${RESET}"
+            echo -e "${YELLOW}[Пропущено. Сохраните ключ в ~/.config/302_key или переменную 302_API_KEY]${RESET}"
         fi
     else
         echo -e "${GREEN}[API ключ найден]${RESET}"
