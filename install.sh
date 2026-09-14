@@ -79,11 +79,22 @@ install_deps() {
 
 # ─────────────────────────── nlohmann/json (header-only) ─────
 install_nlohmann() {
-    echo -e "${YELLOW}[Устанавливаю nlohmann/json...]${RESET}"
     mkdir -p "$NLOHMANN_DIR"
+    # Правка 3: не перезаписываем уже установленный json.hpp — у пользователя
+    # может быть более новая версия (системная или из другого проекта).
+    if [ -s "$NLOHMANN_DIR/json.hpp" ]; then
+        echo -e "${GREEN}[nlohmann/json уже установлен: $NLOHMANN_DIR/json.hpp — пропускаю]${RESET}"
+        return
+    fi
+    echo -e "${YELLOW}[Устанавливаю nlohmann/json...]${RESET}"
     # Прибито к стабильному тегу — develop-ветка ломает сборки
     curl -fsSL "https://github.com/nlohmann/json/releases/download/v3.11.3/json.hpp" \
         -o "$NLOHMANN_DIR/json.hpp"
+    # Правка 4: curl может вернуть 0, но оставить пустой файл (прокси, DNS-хайджек).
+    if [ ! -s "$NLOHMANN_DIR/json.hpp" ]; then
+        echo -e "${RED}[Не удалось скачать json.hpp — файл пуст или отсутствует]${RESET}"
+        exit 1
+    fi
     echo -e "${GREEN}[nlohmann/json установлен: $NLOHMANN_DIR/json.hpp]${RESET}"
 }
 
@@ -117,8 +128,20 @@ install_binary() {
     fi
     echo -e "${YELLOW}[Устанавливаю бинарник в $INSTALL_DIR...]${RESET}"
     mkdir -p "$INSTALL_DIR"
-    cp "$TMP_DIR/sw_chat" "$INSTALL_DIR/sw_chat"
-    chmod +x "$INSTALL_DIR/sw_chat"
+    # Правка 5: атомарная установка — копируем во временный файл рядом и mv.
+    # Это защищает от битого рабочего бинаря, если cp упадёт на середине.
+    local tmp_install="$INSTALL_DIR/.sw_chat.new.$$"
+    if ! cp "$TMP_DIR/sw_chat" "$tmp_install"; then
+        echo -e "${RED}[Не удалось скопировать бинарник во временный файл]${RESET}"
+        rm -f "$tmp_install"
+        exit 1
+    fi
+    chmod +x "$tmp_install"
+    if ! mv -f "$tmp_install" "$INSTALL_DIR/sw_chat"; then
+        echo -e "${RED}[Не удалось заменить $INSTALL_DIR/sw_chat]${RESET}"
+        rm -f "$tmp_install"
+        exit 1
+    fi
     echo -e "${GREEN}[Установлено: $INSTALL_DIR/sw_chat]${RESET}"
 }
 
@@ -131,10 +154,15 @@ check_path() {
         elif [ -f "$HOME/.zshrc" ]; then SHELL_RC="$HOME/.zshrc"
         fi
         if [ -n "$SHELL_RC" ]; then
-            echo "" >> "$SHELL_RC"
-            echo "# sw_chat" >> "$SHELL_RC"
-            echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$SHELL_RC"
-            echo -e "${YELLOW}[Добавлено в $SHELL_RC. Выполните: source $SHELL_RC]${RESET}"
+            # Правка 1: не дублируем запись при повторном запуске install.sh.
+            if grep -qF '# sw_chat' "$SHELL_RC" 2>/dev/null; then
+                echo -e "${GREEN}[Строка PATH уже есть в $SHELL_RC — пропускаю]${RESET}"
+            else
+                echo "" >> "$SHELL_RC"
+                echo "# sw_chat" >> "$SHELL_RC"
+                echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$SHELL_RC"
+                echo -e "${YELLOW}[Добавлено в $SHELL_RC. Выполните: source $SHELL_RC]${RESET}"
+            fi
         else
             echo -e "${YELLOW}[Добавьте вручную в ваш shell rc: export PATH=\"\$HOME/.local/bin:\$PATH\"]${RESET}"
         fi
@@ -146,7 +174,16 @@ setup_api_key() {
     if [ -z "$302_API_KEY" ] && [ ! -f "$HOME/.config/302_key" ]; then
         echo -e "${YELLOW}[API ключ не найден]${RESET}"
         echo -e "Получите ключ на ${CYAN}https://302.ai${RESET}"
-        read -rp "Введите ваш 302.ai API ключ (или Enter чтобы пропустить): " apikey
+        # Правка 2: при запуске через pipe (curl ... | bash) stdin занят скриптом —
+        # читаем из /dev/tty. Если tty недоступен — просто пропускаем шаг.
+        apikey=""
+        if [ -t 0 ]; then
+            read -rp "Введите ваш 302.ai API ключ (или Enter чтобы пропустить): " apikey
+        elif [ -r /dev/tty ]; then
+            read -rp "Введите ваш 302.ai API ключ (или Enter чтобы пропустить): " apikey < /dev/tty
+        else
+            echo -e "${YELLOW}[Нет tty — пропускаю ввод. Сохраните ключ позже в ~/.config/302_key]${RESET}"
+        fi
         if [ -n "$apikey" ]; then
             mkdir -p "$HOME/.config"
             printf "%s" "$apikey" > "$HOME/.config/302_key"

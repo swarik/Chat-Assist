@@ -35,7 +35,7 @@
 
 using json = nlohmann::json;
 // ─────────────────────────── Версия ───────────────────────────
-#define APP_VERSION "1.4.9"
+#define APP_VERSION "1.4.10"
 
 
 // Emoji_Presentation: всегда отображается как emoji (ширина 2)
@@ -330,7 +330,25 @@ static std::string get_api_key() {
     const char* env = getenv("302_API_KEY");
     if (env && std::string(env).size() > 10) return std::string(env);
     std::string home = get_home_dir();
-    std::ifstream f(home + "/.config/302_key");
+    std::string keyfile = home + "/.config/302_key";
+
+    // P0.3: предупреждаем, если файл ключа доступен группе/остальным, и пробуем
+    // исправить права автоматически (chmod 600).
+    {
+        struct stat st;
+        if (stat(keyfile.c_str(), &st) == 0) {
+            if ((st.st_mode & (S_IRWXG | S_IRWXO)) != 0) {
+                std::cerr << C_YELLOW
+                          << "[WARN: " << keyfile << " доступен группе/остальным (mode "
+                          << std::oct << (st.st_mode & 0777) << std::dec
+                          << "). Исправляю на 600...]"
+                          << C_RESET << std::endl;
+                chmod(keyfile.c_str(), 0600);
+            }
+        }
+    }
+
+    std::ifstream f(keyfile);
     if (f.is_open()) {
         std::string key;
         std::getline(f, key);
@@ -1412,26 +1430,81 @@ static void voice_speak(const std::string& text) {
 // Выполняет один bash-блок с подтверждением
 // FIRE: эвристика потенциально опасных команд (спрашиваем даже в FIRE).
 static bool looks_dangerous(const std::string& cmd) {
-    static const char* pats[] = {
-        "rm -rf /", "rm -fr /", "rm -rf ~", "rm -fr ~",
-        ":(){", ": ()", ":() {",
-        "mkfs", "wipefs",
-        "of=/dev/", "> /dev/sd", "> /dev/nvme", "> /dev/mmcblk",
-        "chmod -R 777 /",
-        "| sh", "| bash", "|sh", "|bash"
-    };
-    // dd считаем опасным только в связке с of=
-    std::string c; c.reserve(cmd.size()); bool sp = false;
+    // P0.4: расширенная эвристика. Это НЕ защита, а вежливое "точно ли?".
+    // Канонизируем вход:
+    //   - lowercase;
+    //   - переносы строк/табы -> пробел (одномерная форма);
+    //   - сжатие подряд идущих пробелов;
+    //   - выкидываем кавычки: обход "rm -rf $HOME" -> "rm -rf ~";
+    //   - $HOME / ${HOME} -> ~ (чтобы стандартные варианты ловились).
+    std::string c;
+    c.reserve(cmd.size());
+    bool sp = false;
     for (char ch : cmd) {
-        if (ch == ' ' || ch == '\t') { if (!sp) c += ' '; sp = true; }
-        else { c += ch; sp = false; }
+        if (ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r') {
+            if (!sp) c += ' ';
+            sp = true;
+        } else if (ch == '"' || ch == '\'') {
+            continue;   // кавычки выкидываем
+        } else {
+            c += static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+            sp = false;
+        }
     }
+    while (!c.empty() && c.back() == ' ') c.pop_back();
+
+    auto replace_all = [](std::string& s, const std::string& from, const std::string& to) {
+        if (from.empty()) return;
+        size_t pos = 0;
+        while ((pos = s.find(from, pos)) != std::string::npos) {
+            s.replace(pos, from.size(), to);
+            pos += to.size();
+        }
+    };
+    replace_all(c, "${home}", "~");
+    replace_all(c, "$home",   "~");
+
+    static const char* pats[] = {
+        // перезапись/удаление корня и домашнего каталога
+        "rm -rf /", "rm -fr /",
+        "rm -rf /*", "rm -fr /*",
+        "rm -rf ~", "rm -fr ~",
+        "rm -rf ~/*", "rm -fr ~/*",
+        "rm -rf --no-preserve-root", "rm -fr --no-preserve-root",
+        "rm -rf .", "rm -fr .",           // снести текущий каталог
+        // fork bomb
+        ":(){", ": (){", ":() {",
+        // дисковые и низкоуровневые
+        "mkfs", "wipefs", "shred", "blkdiscard",
+        "of=/dev/", "of=/dev",
+        "> /dev/sd", "> /dev/nvme", "> /dev/mmcblk",
+        "> /dev/hd", "> /dev/da", "> /dev/vd", "> /dev/xvd",
+        // системные каталоги
+        "> /etc/", "> /boot/", "> /sys/", "> /proc/",
+        // опасные права
+        "chmod -r 777 /", "chmod 777 -r /",
+        "chmod -r 000 /",
+        "chown -r /", "chown -r /*",
+        // пайп в шелл (выполнить чужой код без просмотра)
+        "| sh", "|sh", "| bash", "|bash",
+        // массовое удаление через find
+        "find / -delete", "find / -exec rm",
+        // питание/инициализация
+        "shutdown", "reboot", "halt", "poweroff", "init 0", "init 6",
+        // глобальный kill
+        "kill -9 -1", "killall5",
+        // eval динамической строки
+        "eval $(", "eval `",
+    };
+    // dd опасен только в связке с of=
     if (c.find("dd ") != std::string::npos && c.find("of=") != std::string::npos) return true;
     for (const char* p : pats) if (c.find(p) != std::string::npos) return true;
     return false;
 }
 
-// local_autorun — локальный флаг "запустить все блоки текущего пакета" (не трогает G.autorun)
+// local_autorun — флаг "запустить без вопросов до конца цепочки":
+// действует на все блоки текущего пакета И на последующие ответы модели
+// в рамках одной bash-цепочки. Не трогает G.autorun (это отдельный глобальный флаг).
 std::string execute_single_bash(const std::string &bash_code, int idx, int total, bool &local_autorun) {
     if (total > 1 && !G.fire)
         std::cout << C_YELLOW << "[Bash блок " << (idx+1) << "/" << total << "]" << C_RESET << std::endl;
@@ -1455,9 +1528,9 @@ std::string execute_single_bash(const std::string &bash_code, int idx, int total
     if (G.fire) {
         if (looks_dangerous(bash_code)) {
             std::cout << C_RED << C_BOLD
-                      << "⚠ FIRE: похоже на опасную команду. Всё равно выполнить? [y/N] "
+                      << "⚠ FIRE: похоже на опасную команду. Всё равно выполнить? "
                       << C_RESET << std::flush;
-            char* rl = readline("");
+            char* rl = readline(C_RED "(y/n) " C_RESET);
             std::string ans = rl ? std::string(rl) : std::string();
             if (rl) free(rl);
             if (!(ans == "y" || ans == "Y" || ans == "д" || ans == "Д")) {
@@ -1466,11 +1539,16 @@ std::string execute_single_bash(const std::string &bash_code, int idx, int total
             }
         }
     } else if (!G.autorun && !local_autorun) {
-        // Если блок только один — /a (выполнить все) бессмысленен, предлагаем y/n.
+        // 'a' (выполнить без вопросов до конца цепочки) предлагаем только когда
+        // в текущем ответе блоков больше одного — иначе это лишний вариант.
+        // Если 'a' нажато, флаг local_autorun живёт до конца всей bash-цепочки
+        // (объявлен в process_response), а не только текущего ответа.
         const char* prompt;
         if (is_compact()) {
-            prompt = (total > 1) ? C_YELLOW "[y/n/a]? " C_RESET
-                                 : C_YELLOW "[y/n]? " C_RESET;
+            // Короткий режим: только минимальная подсказка. Русские д/н/в
+            // всё равно принимаются обработчиком ниже.
+            prompt = (total > 1) ? C_YELLOW "(y/n/a) " C_RESET
+                                 : C_YELLOW "(y/n) " C_RESET;
         } else {
             prompt = (total > 1)
                 ? C_YELLOW "[Выполнить команду? (y/n/a-все|д/н/в)]: " C_RESET
@@ -2401,8 +2479,8 @@ void process_response(const std::string &content, bool aborted, size_t msgs_befo
     if (aborted) {
         print_assistant_text(content);
         const char* prompt = is_compact()
-            ? C_YELLOW "[save y/n]? " C_RESET
-            : C_YELLOW "[Ответ прерван. Сохранить в историю? (y/n)]: " C_RESET;
+            ? C_YELLOW "(y/n) " C_RESET
+            : C_YELLOW "[Ответ прерван. Сохранить в историю? (y/n | д/н)]: " C_RESET;
         char *rl_ans = readline(prompt);
         std::string ans;
         if (rl_ans) { ans = std::string(rl_ans); free(rl_ans); }
@@ -2476,6 +2554,13 @@ void process_response(const std::string &content, bool aborted, size_t msgs_befo
         return bbs;
     };
 
+    // chain_autorun живёт на уровне всего process_response и сохраняет состояние
+    // между вызовами render_and_execute, чтобы 'a' покрывало всю цепочку
+    // (все ответы модели до MAX_BASH_CHAIN), а не только текущий ответ.
+    // Сбрасывается автоматически при следующем вводе пользователя — process_response
+    // вызывается заново, и переменная создаётся со значением false.
+    bool chain_autorun = false;
+
     // ── Функция: вывести ответ по частям, останавливаясь на bash-блоках ──
     // leftover — текст после последнего bash-блока (не рендерится, ждёт результатов)
     auto render_and_execute = [&](const std::string &text, std::string &leftover) -> std::string {
@@ -2496,7 +2581,7 @@ void process_response(const std::string &content, bool aborted, size_t msgs_befo
         std::string combined_result;
         size_t cur = 0;
         int total = static_cast<int>(bbs.size());
-        bool local_autorun = false;
+        // chain_autorun захвачен снаружи по ссылке (см. объявление выше).
 
         for (int i = 0; i < total; ++i) {
             // Текст до bash-блока
@@ -2518,8 +2603,8 @@ void process_response(const std::string &content, bool aborted, size_t msgs_befo
             }
             std::cout << std::flush;
 
-            // Выполняем
-            std::string res = execute_single_bash(bbs[i].code, i, total, local_autorun);
+            // Выполняем (флаг chain_autorun общий для всей цепочки)
+            std::string res = execute_single_bash(bbs[i].code, i, total, chain_autorun);
             if (!res.empty()) {
                 if (!combined_result.empty()) combined_result += "\n---\n";
                 if (total > 1) combined_result += "[Блок " + std::to_string(i+1) + "]:\n";
@@ -2801,7 +2886,10 @@ void cmd_update() {
 
     // Запрашиваем согласие пользователя
     {
-        char *rl_ans = readline(C_YELLOW "[update] Установить обновление? (y/n): " C_RESET);
+        const char* upd_prompt = is_compact()
+            ? C_YELLOW "(y/n) " C_RESET
+            : C_YELLOW "[update] Установить обновление? (y/n | д/н): " C_RESET;
+        char *rl_ans = readline(upd_prompt);
         std::string ans;
         if (rl_ans) { ans = std::string(rl_ans); free(rl_ans); }
         if (ans != "y" && ans != "Y" && ans != "д" && ans != "Д") {
@@ -2852,17 +2940,59 @@ void cmd_update() {
     std::cout << C_YELLOW << "[update] Сохраняю историю..." << C_RESET << std::endl;
     save_history();
 
-    // 7. Заменить старые файлы (mv атомарно, не блокируется запущенным процессом)
+    // P0.2: перед подменой убеждаемся, что новый бинарь ЗАПУСКАЕТСЯ и отвечает на --version.
+    // Если новый бинарь нерабочий — отказ без подмены рабочего.
+    {
+        std::string probe_cmd = shell_escape(new_bin) + " --version >/dev/null 2>&1";
+        int probe_res = system(probe_cmd.c_str());
+        if (probe_res != 0) {
+            std::cerr << C_RED << "[update: новый бинарь не запускается, обновление отменено]"
+                      << C_RESET << std::endl;
+            return;
+        }
+    }
+
+    // 7. Замена. Порядок безопасный:
+    //    - старый бинарь сохраняем как .old (не удаляем — оставляем возможность отката);
+    //    - бинарь подменяем атомарным mv;
+    //    - исходник копируем (не mv) — исходник остаётся для диффов/бэкапа.
     std::string old_bin = cur_bin + ".old";
-    std::string mv_cmd = "mv " + shell_escape(cur_bin) + " " + shell_escape(old_bin) + " && "
-        + "mv " + shell_escape(new_bin) + " " + shell_escape(cur_bin) + " && chmod +x " + shell_escape(cur_bin) + " && "
-        + "mv " + shell_escape(new_src) + " " + shell_escape(home + "/sw_chat.cpp") + " && "
-        + "rm -f " + shell_escape(old_bin);
-    int mv_res = system(mv_cmd.c_str());
-    if (mv_res != 0) {
-        std::cerr << C_RED << "[update: не удалось заменить файлы]" << C_RESET << std::endl;
+    std::string src_path = home + "/sw_chat.cpp";
+
+    auto run = [](const std::string& cmd) -> int { return system(cmd.c_str()); };
+
+    // 7a. Снести предыдущий .old (если был) и сохранить текущий бинарь как .old.
+    std::string backup_cmd = "rm -f " + shell_escape(old_bin) + " && cp -a "
+        + shell_escape(cur_bin) + " " + shell_escape(old_bin);
+    if (run(backup_cmd) != 0) {
+        std::cerr << C_RED << "[update: не удалось создать резервную копию " << old_bin
+                  << "]" << C_RESET << std::endl;
         return;
     }
+
+    // 7b. Заменить бинарь атомарно.
+    std::string replace_bin_cmd = "mv " + shell_escape(new_bin) + " " + shell_escape(cur_bin)
+        + " && chmod +x " + shell_escape(cur_bin);
+    if (run(replace_bin_cmd) != 0) {
+        std::cerr << C_RED << "[update: не удалось заменить бинарь]" << C_RESET << std::endl;
+        return;
+    }
+
+    // 7c. Скопировать исходник (сначала во временный файл рядом, затем атомарный mv).
+    std::string src_tmp = src_path + ".new";
+    {
+        std::string cp_cmd = "cp -a " + shell_escape(new_src) + " " + shell_escape(src_tmp)
+            + " && mv " + shell_escape(src_tmp) + " " + shell_escape(src_path);
+        if (run(cp_cmd) != 0) {
+            std::cerr << C_YELLOW
+                      << "[update: бинарь обновлён, но исходник не скопирован в "
+                      << src_path << "]"
+                      << C_RESET << std::endl;
+        }
+    }
+
+    std::cout << C_GRAY << "[update: бэкап бинаря сохранён: " << old_bin
+              << " (можно удалить вручную)]" << C_RESET << std::endl;
 
     std::cout << C_GREEN << C_BOLD << "[update] Обновление установлено! Перезапуск..." << C_RESET << std::endl;
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
@@ -2931,7 +3061,7 @@ static bool confirm_exit() {
     if (!isatty(fileno(stdin))) return true;   // неинтерактивно — выходим молча
 
     const char* prompt = is_compact()
-        ? C_YELLOW "[Выходите из программы? y/n] " C_RESET
+        ? C_YELLOW "(y/n) " C_RESET
         : C_YELLOW "[Выходите из программы? (y/n | д/н)]: " C_RESET;
 
     std::cout.flush(); fflush(stdout);
@@ -4260,15 +4390,32 @@ int main(int argc, char *argv[]) {
                           << " | autorun: " << (G.autorun ? "ВКЛ" : "выкл")
                           << "]" << C_RESET << std::endl;
             } else if (fa == "on") {
+                // P0.1: FIRE — режим без подтверждения bash. Требуем осознанное "yes".
+                std::cout << C_RED << C_BOLD << "🔥 FIRE: ВКЛЮЧЕНИЕ ВЫПОЛНЯЕТСЯ БЕЗ ПОДТВЕРЖДЕНИЙ." << C_RESET << std::endl;
+                std::cout << C_RED
+                          << "  Все ```bash-блоки модели будут выполняться молча:\n"
+                          << "  - без показа кода команды;\n"
+                          << "  - без показа вывода;\n"
+                          << "  - без запроса y/n;\n"
+                          << "  - от имени текущего пользователя (доступ ко всем вашим файлам и ключам).\n"
+                          << C_RESET << std::endl;
+                std::cout << C_YELLOW
+                          << "  Включить только если понимаете риск. Введите ровно 'yes' для входа,\n"
+                          << "  что угодно другое — отмена." << C_RESET << std::endl;
+                char* fire_rl = readline(C_RED "FIRE> " C_RESET);
+                std::string fire_ans = fire_rl ? std::string(fire_rl) : std::string();
+                if (fire_rl) free(fire_rl);
+                while (!fire_ans.empty() && (fire_ans.back() == '\n' || fire_ans.back() == '\r' || fire_ans.back() == ' '))
+                    fire_ans.pop_back();
+                if (fire_ans != "yes") {
+                    std::cout << C_GREEN << "[FIRE: отменено, режим НЕ включён]" << C_RESET << std::endl;
+                    continue;
+                }
                 G.fire = true;
                 G.autorun = true;
                 G.compact_mode = true;
                 save_config();
                 std::cout << C_RED << C_BOLD << "🔥 FIRE: ВКЛЮЧЁН." << C_RESET << std::endl;
-                std::cout << C_RED << "  bash-блоки выполняются молча: код на экране нет, "
-                                       "вывод нет, подтверждения нет." << C_RESET << std::endl;
-                std::cout << C_YELLOW << "  Результат команды всё равно уходит в контекст модели."
-                          << C_RESET << std::endl;
                 std::cout << C_YELLOW << "  Выключить: /FIRE off   Аварийно: /FIRE blast"
                           << C_RESET << std::endl;
             } else if (fa == "off") {
