@@ -35,7 +35,7 @@
 
 using json = nlohmann::json;
 // ─────────────────────────── Версия ───────────────────────────
-#define APP_VERSION "1.4.10"
+#define APP_VERSION "1.4.11"
 
 
 // Emoji_Presentation: всегда отображается как emoji (ширина 2)
@@ -125,6 +125,7 @@ static bool is_emoji_codepoint(int cp) { return cp_in_ranges(cp, EMOJI_CODE, siz
 // ─────────────────────────── Цвета ───────────────────────────
 #define C_RESET   "\033[0m"
 #define C_GREEN   "\033[32m"
+#define C_INPUT   "\033[96m"   // цвет текста, вводимого пользователем
 #define C_CYAN    "\033[36m"
 #define C_YELLOW  "\033[33m"
 #define C_RED     "\033[31m"
@@ -2195,7 +2196,7 @@ static int resolve_model_arg(const std::string& arg, std::string& resolved, std:
 static std::string build_prompt() {
     // compact: minimal prompt, no context bar / hints
     if (is_compact())
-        return "\001\033[32m\002\xe2\x9d\xaf \001\033[0m\002";
+        return "\001\033[32m\002\xe2\x9d\xaf \001" C_INPUT "\002";
 
     size_t chars = 0;
     int msgs = 0;
@@ -2228,7 +2229,7 @@ static std::string build_prompt() {
     p += " \xc2\xb7 ~" + std::to_string(approx_tokens_messages()) + " tok";
     p += "\001"; p += C_RESET;  p += "\002"; p += "\n";
     p += "\001"; p += C_BOLD;   p += C_GREEN; p += "\002"; p += "\xe2\x9d\xaf "; // ❯
-    p += "\001"; p += C_RESET;  p += "\002";
+    p += "\001"; p += C_INPUT;  p += "\002";
     return p;
 }
 
@@ -3890,7 +3891,7 @@ static bool get_user_input(std::string &out) {
 
         std::string prompt = first_line
             ? build_prompt()
-            : ("\001" C_GREEN "\002" + std::to_string(line_num) + "\xe2\x80\xa6 \001" C_RESET "\002");
+            : ("\001" C_GREEN "\002" + std::to_string(line_num) + "\xe2\x80\xa6 \001" C_INPUT "\002");
 
         // Голосовой ввод: распознаём речь → подставляем текст в readline
         // (можно отредактировать или сразу нажать Enter).
@@ -3925,6 +3926,7 @@ static bool get_user_input(std::string &out) {
         std::cout.flush(); fflush(stdout); // Сброс буферов перед readline
         rl_startup_hook = voice_prefill_hook;
         char *line = readline(prompt.c_str());
+        std::cout << C_RESET;  // сброс цвета ввода пользователя
         rl_startup_hook = nullptr;
         g_rl_prefill.clear();
 
