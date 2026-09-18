@@ -25,6 +25,7 @@
 #include <chrono>
 #include <ctime>
 #include <mutex>
+#include <memory>
 #include <iterator>
 #include <cstring>
 #include <clocale>
@@ -35,7 +36,7 @@
 
 using json = nlohmann::json;
 // ─────────────────────────── Версия ───────────────────────────
-#define APP_VERSION "1.4.10"
+#define APP_VERSION "1.4.20"
 
 
 // Emoji_Presentation: всегда отображается как emoji (ширина 2)
@@ -125,6 +126,7 @@ static bool is_emoji_codepoint(int cp) { return cp_in_ranges(cp, EMOJI_CODE, siz
 // ─────────────────────────── Цвета ───────────────────────────
 #define C_RESET   "\033[0m"
 #define C_GREEN   "\033[32m"
+#define C_INPUT   "\033[96m"   // цвет текста, вводимого пользователем
 #define C_CYAN    "\033[36m"
 #define C_YELLOW  "\033[33m"
 #define C_RED     "\033[31m"
@@ -183,12 +185,17 @@ static std::string replace_flags(const std::string &s) {
 }
 
 static std::string get_home_dir() {
-    const char* h = getenv("HOME");
-    return h ? std::string(h) : "/tmp";
+    // Кеш: getenv возвращает pointer в environ, значение не меняется за время
+    // работы процесса — читаем один раз.
+    static const std::string cached = []() -> std::string {
+        const char* h = getenv("HOME");
+        return h ? std::string(h) : std::string("/tmp");
+    }();
+    return cached;
 }
 
 // ─────────────────────────── Константы ───────────────────────
-#define CMD_TIMEOUT         250
+#define CMD_TIMEOUT         400
 #define MAX_CMD_OUTPUT      50000
 #define MAX_FILE_BYTES      200000
 #define MAX_MSG_CHARS       120000
@@ -202,6 +209,17 @@ static std::string get_home_dir() {
 #define DEFAULT_TEMPERATURE 0.7
 #define DEFAULT_MAX_TOKENS  4096
 #define DEFAULT_API_BASE    "https://api.302.ai"
+
+// Networking / API / runtime constants (named magic numbers)
+#define CURL_TOTAL_TIMEOUT_S      420L
+#define CURL_CONNECT_TIMEOUT_S    15L
+#define API_MAX_RETRIES           3
+#define API_RETRY_BACKOFF_S       2
+#define API_MAX_RETRY_AFTER_S     60
+#define POLL_SLICE_MS             200
+#define HISTORY_NOTIFY_EVERY      24
+#define CMD_OUTPUT_HARD_CAP_MULT  4
+#define MIN_API_KEY_LEN           10
 
 static std::string HISTORY_FILE;
 static std::string SYSTEM_PROMPT_FILE;
@@ -243,6 +261,7 @@ struct ChatSession {
     bool              nores                    = false; // выкл по умолчанию
     bool              compact_mode             = false;
     bool              fire                     = false; // FIRE = silent_bash + autorun
+    int               fire_level               = 3;     // 0..5, см. /FIRE N
     bool              time_prefix              = false; // префикс даты-времени МСК в начале запроса
     bool              voice_in                 = false; // STT: termux-speech-to-text
     bool              voice_out                = false; // TTS: termux-tts-speak
@@ -263,7 +282,9 @@ static ChatSession G;
 
 // ───────── /undo снапшоты ─────────
 static std::vector<std::vector<json>> g_undo_stack;
-static const size_t UNDO_MAX = 20;
+// На 235 МБ RAM каждый снимок — это полная копия G.messages (~json,
+// на длинной сессии может быть единицы МБ). 8 отмен достаточно, 20 — риск OOM.
+static const size_t UNDO_MAX = 8;
 static void push_undo_snapshot() {
     g_undo_stack.push_back(G.messages);
     if (g_undo_stack.size() > UNDO_MAX)
@@ -1058,21 +1079,24 @@ static void render_markdown(const std::string &text) {
 }
 
 // ─────────────────────────── История ─────────────────────────
+// forward decl: atomic_write_file определяется ниже (после ensure_dir),
+// но вызывается уже здесь.
+static bool atomic_write_file(const std::string& path, const std::string& data);
+
 void save_history(bool silent = false) {
     try {
         json j = json::array();
         for (auto &m : G.messages) j.push_back(m);
-        std::ofstream f(G.history_file);
-        if (f.is_open()) {
-            f << j.dump(2, ' ', false, json::error_handler_t::replace);
+        std::string blob = j.dump(2, ' ', false, json::error_handler_t::replace);
+        if (atomic_write_file(G.history_file, blob)) {
             if (!silent) std::cout << C_YELLOW << "[История сохранена: " << G.history_file
                       << "]" << C_RESET << std::endl;
         } else {
-            std::cerr << C_RED << "[Не удалось открыть файл истории для записи]"
-                      << C_RESET << std::endl;
+            std::cerr << C_RED << "[Не удалось сохранить файл истории: " << G.history_file
+                      << "]" << C_RESET << std::endl;
         }
-    } catch (...) {
-        std::cerr << C_RED << "[Ошибка сохранения истории]" << C_RESET << std::endl;
+    } catch (const std::exception& e) {
+        std::cerr << C_RED << "[Ошибка сохранения истории: " << e.what() << "]" << C_RESET << std::endl;
     }
 }
 
@@ -1124,6 +1148,25 @@ static void note_gray(const std::string& s) {
 static void note_yellow(const std::string& s) {
     if (is_compact()) return;
     std::cout << C_YELLOW << s << C_RESET << std::endl;
+}
+
+// Единая обёртка над readline для y/n[/a]-вопросов.
+// Возврат: 0 = NO (в т.ч. Ctrl+C/EOF/пустой ввод — безопасный дефолт),
+//          1 = YES, 2 = ALL (только при allow_all=true, для "a/в").
+static int ask_yes_no(const char* prompt, bool allow_all = false) {
+    std::cout.flush(); fflush(stdout);
+    char* rl = readline(prompt);
+    if (!rl) return 0;
+    std::string ans(rl); free(rl);
+    while (!ans.empty() && (ans.front() == ' ' || ans.front() == '\t')) ans.erase(0, 1);
+    while (!ans.empty() && (ans.back() == ' ' || ans.back() == '\t' ||
+                            ans.back() == '\r' || ans.back() == '\n')) ans.pop_back();
+    if (ans.empty()) return 0;
+    if (ans == "y" || ans == "Y" || ans == "yes" || ans == "Yes" ||
+        ans == "д" || ans == "Д" || ans == "да" || ans == "Да") return 1;
+    if (allow_all && (ans == "a" || ans == "A" || ans == "в" || ans == "В" ||
+                      ans == "все" || ans == "Все")) return 2;
+    return 0;
 }
 
 static void print_assistant_text(const std::string& content, bool with_header = true) {
@@ -1229,8 +1272,18 @@ ExecResult exec_with_timeout_ex(const std::string& cmd, int timeout_sec) {
         dup2(pipefd[1], STDOUT_FILENO);
         dup2(pipefd[1], STDERR_FILENO);
         if (pipefd[1] > STDERR_FILENO) close(pipefd[1]);
-        execl("/system/bin/sh", "sh", "-c", cmd.c_str(), static_cast<char*>(nullptr));
-        execl("/bin/sh", "sh", "-c", cmd.c_str(), static_cast<char*>(nullptr));
+        // Скрываем API-ключи от подпроцесса: env/printenv или модель через
+        // скрипт не должны видеть секреты в окружении.
+        unsetenv("302_API_KEY");       unsetenv("OPENAI_API_KEY");
+        unsetenv("ANTHROPIC_API_KEY"); unsetenv("OPENROUTER_API_KEY");
+        unsetenv("GEMINI_API_KEY");    unsetenv("GOOGLE_API_KEY");
+        unsetenv("GROQ_API_KEY");      unsetenv("MISTRAL_API_KEY");
+        // bash первым: /bin/sh на Ubuntu = dash, и bashism'ы (PIPESTATUS,
+        // массивы, [[ ]]) там падают с "Bad substitution" и теряют вывод.
+        execl("/system/bin/bash", "bash", "-c", cmd.c_str(), static_cast<char*>(nullptr));
+        execl("/system/bin/sh",   "sh",   "-c", cmd.c_str(), static_cast<char*>(nullptr));
+        execl("/bin/bash",        "bash", "-c", cmd.c_str(), static_cast<char*>(nullptr));
+        execl("/bin/sh",          "sh",   "-c", cmd.c_str(), static_cast<char*>(nullptr));
         _exit(127);
     }
 
@@ -1268,7 +1321,7 @@ ExecResult exec_with_timeout_ex(const std::string& cmd, int timeout_sec) {
         }
         if (r == 0) { child_done = true; break; }
         outp.append(buf, static_cast<size_t>(r));
-        if (outp.size() > static_cast<size_t>(MAX_CMD_OUTPUT) * 4) break; // защита от ^C-спама
+        if (outp.size() > static_cast<size_t>(MAX_CMD_OUTPUT) * CMD_OUTPUT_HARD_CAP_MULT) break; // защита от ^C-спама
     }
 
     // Прибираем дочернее дерево, если оно ещё живо.
@@ -1291,7 +1344,7 @@ ExecResult exec_with_timeout_ex(const std::string& cmd, int timeout_sec) {
         ssize_t r = read(fd, buf, sizeof(buf));
         if (r <= 0) break;
         outp.append(buf, static_cast<size_t>(r));
-        if (outp.size() > static_cast<size_t>(MAX_CMD_OUTPUT) * 4) break;
+        if (outp.size() > static_cast<size_t>(MAX_CMD_OUTPUT) * CMD_OUTPUT_HARD_CAP_MULT) break;
     }
     // FIX(BUG1): всегда дожидаемся завершения ребёнка, чтобы получить
     // корректный status. Раньше при нормальном выходе (read()==0 ->
@@ -1424,81 +1477,254 @@ static void voice_speak(const std::string& text) {
     if (G.voice_rate  != 1.0) { char b[32]; snprintf(b, sizeof(b), " -r %.2f", G.voice_rate);  cmd += b; }
     if (!G.voice_stream.empty())  cmd += " -s " + shell_escape(G.voice_stream);
     cmd += " " + shell_escape(text) + " </dev/null >/dev/null 2>&1 &";
-    system(cmd.c_str());
+    int tts_rc = system(cmd.c_str()); (void)tts_rc;   // фон, статус не важен
 }
 
 // Выполняет один bash-блок с подтверждением
-// FIRE: эвристика потенциально опасных команд (спрашиваем даже в FIRE).
-static bool looks_dangerous(const std::string& cmd) {
-    // P0.4: расширенная эвристика. Это НЕ защита, а вежливое "точно ли?".
-    // Канонизируем вход:
-    //   - lowercase;
-    //   - переносы строк/табы -> пробел (одномерная форма);
-    //   - сжатие подряд идущих пробелов;
-    //   - выкидываем кавычки: обход "rm -rf $HOME" -> "rm -rf ~";
-    //   - $HOME / ${HOME} -> ~ (чтобы стандартные варианты ловились).
+// ─────────────────────────── FIRE: фильтр опасных команд ─────
+// Строгость задаётся G.fire_level (команда /FIRE N):
+//   0 — только hard-stop: rm -rf /|~, mkfs, dd of=/dev/*, fork-bomb
+//   1 — + системные каталоги, глобальные chmod/chown, shutdown/reboot/kill-all
+//   2 — + эксфильтрация (curl/wget upload), remote-exec (nc -e, bash -c, eval)
+//   3 — + секретные пути (.ssh, .env, *key, id_rsa, .bash_history, .gnupg)
+//   4 — + подстановки $() и бэктики (можно спрятать любую команду)
+//   5 — + whitelist: 1-й токен каждого сегмента должен быть из FIRE_SAFE_CMDS
+
+static std::string danger_canon(const std::string& cmd) {
     std::string c;
     c.reserve(cmd.size());
-    bool sp = false;
+    bool prev_sp = false;
     for (char ch : cmd) {
         if (ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r') {
-            if (!sp) c += ' ';
-            sp = true;
+            if (!c.empty() && !prev_sp) c += ' ';
+            prev_sp = true;
         } else if (ch == '"' || ch == '\'') {
-            continue;   // кавычки выкидываем
+            continue;
         } else {
             c += static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-            sp = false;
+            prev_sp = false;
         }
     }
     while (!c.empty() && c.back() == ' ') c.pop_back();
-
-    auto replace_all = [](std::string& s, const std::string& from, const std::string& to) {
-        if (from.empty()) return;
-        size_t pos = 0;
-        while ((pos = s.find(from, pos)) != std::string::npos) {
-            s.replace(pos, from.size(), to);
-            pos += to.size();
+    auto repl = [](std::string& s, const std::string& from, const std::string& to) {
+        size_t p = 0;
+        while ((p = s.find(from, p)) != std::string::npos) {
+            s.replace(p, from.size(), to);
+            p += to.size();
         }
     };
-    replace_all(c, "${home}", "~");
-    replace_all(c, "$home",   "~");
+    repl(c, "${home}", "~");
+    repl(c, "$home",   "~");
+    return c;
+}
 
-    static const char* pats[] = {
-        // перезапись/удаление корня и домашнего каталога
+static bool c_has_any(const std::string& c, const char* const* pats) {
+    for (const char* const* p = pats; *p; ++p)
+        if (c.find(*p) != std::string::npos) return true;
+    return false;
+}
+
+// Проверка "tok + (space | EOL)". Нужна, чтобы "rm -rf /" не матчил "rm -rf /home"
+// и "rm -rf ~" не матчил "rm -rf ~/Downloads".
+static bool c_has_word(const std::string& c, const char* tok) {
+    size_t tl = std::strlen(tok);
+    size_t p = 0;
+    while ((p = c.find(tok, p)) != std::string::npos) {
+        size_t after = p + tl;
+        if (after >= c.size() || c[after] == ' ') return true;
+        p = after;
+    }
+    return false;
+}
+
+static bool danger_hardstop(const std::string& c) {
+    // rm-паттерны — ПО ГРАНИЦЕ СЛОВА: "rm -rf /" не матчит "rm -rf /home".
+    static const char* words[] = {
         "rm -rf /", "rm -fr /",
         "rm -rf /*", "rm -fr /*",
         "rm -rf ~", "rm -fr ~",
         "rm -rf ~/*", "rm -fr ~/*",
+        "rm -rf .", "rm -fr .",
         "rm -rf --no-preserve-root", "rm -fr --no-preserve-root",
-        "rm -rf .", "rm -fr .",           // снести текущий каталог
-        // fork bomb
+        // chmod/chown: только корень, не /var/www и т.п.
+        "chmod -r 777 /", "chmod 777 -r /",
+        "chown -r /",     "chown -r /*",
+        nullptr
+    };
+    for (const char* const* p = words; *p; ++p)
+        if (c_has_word(c, *p)) return true;
+
+    static const char* pats[] = {
         ":(){", ": (){", ":() {",
-        // дисковые и низкоуровневые
-        "mkfs", "wipefs", "shred", "blkdiscard",
+        "mkfs", "wipefs", "blkdiscard",
         "of=/dev/", "of=/dev",
         "> /dev/sd", "> /dev/nvme", "> /dev/mmcblk",
         "> /dev/hd", "> /dev/da", "> /dev/vd", "> /dev/xvd",
-        // системные каталоги
         "> /etc/", "> /boot/", "> /sys/", "> /proc/",
-        // опасные права
-        "chmod -r 777 /", "chmod 777 -r /",
-        "chmod -r 000 /",
-        "chown -r /", "chown -r /*",
-        // пайп в шелл (выполнить чужой код без просмотра)
-        "| sh", "|sh", "| bash", "|bash",
-        // массовое удаление через find
-        "find / -delete", "find / -exec rm",
-        // питание/инициализация
         "shutdown", "reboot", "halt", "poweroff", "init 0", "init 6",
-        // глобальный kill
-        "kill -9 -1", "killall5",
-        // eval динамической строки
-        "eval $(", "eval `",
+        "find / -delete", "find / -exec rm",
+        nullptr
     };
-    // dd опасен только в связке с of=
+    if (c_has_any(c, pats)) return true;
     if (c.find("dd ") != std::string::npos && c.find("of=") != std::string::npos) return true;
-    for (const char* p : pats) if (c.find(p) != std::string::npos) return true;
+    return false;
+}
+
+static bool danger_system(const std::string& c) {
+    // Удаление целых системных деревьев (не подкаталогов) — по границе слова.
+    static const char* words[] = {
+        "rm -rf /home", "rm -fr /home",
+        "rm -rf /var",  "rm -fr /var",
+        "rm -rf /usr",  "rm -fr /usr",
+        "rm -rf /etc",  "rm -fr /etc",
+        "rm -rf /opt",  "rm -fr /opt",
+        "rm -rf /srv",  "rm -fr /srv",
+        "rm -rf /bin",  "rm -fr /bin",
+        "rm -rf /lib",  "rm -fr /lib",
+        "rm -rf ~/",    "rm -fr ~/",
+        "chmod -r 000 /",
+        nullptr
+    };
+    for (const char* const* p = words; *p; ++p)
+        if (c_has_word(c, *p)) return true;
+
+    static const char* pats[] = {
+        "shred",
+        "kill -9 -1", "killall5",
+        nullptr
+    };
+    return c_has_any(c, pats);
+}
+
+static bool danger_exfil_remote(const std::string& c) {
+    if (c.find("| sh")   != std::string::npos) return true;
+    if (c.find("|sh")    != std::string::npos) return true;
+    if (c.find("| bash") != std::string::npos) return true;
+    if (c.find("|bash")  != std::string::npos) return true;
+    if (c.find("curl") != std::string::npos) {
+        if (c.find(" -d ") != std::string::npos || c.find("--data") != std::string::npos ||
+            c.find(" -f ") != std::string::npos || c.find("--form") != std::string::npos ||
+            c.find(" -t ") != std::string::npos || c.find("--upload-file") != std::string::npos ||
+            c.find(" -x post") != std::string::npos || c.find(" -x put") != std::string::npos ||
+            c.find(" -x patch") != std::string::npos || c.find(" -x delete") != std::string::npos)
+            return true;
+    }
+    if (c.find("wget") != std::string::npos) {
+        if (c.find("--post-data") != std::string::npos ||
+            c.find("--post-file") != std::string::npos ||
+            c.find("--method=post") != std::string::npos) return true;
+    }
+    if ((c.find("nc ") != std::string::npos || c.find("netcat ") != std::string::npos) &&
+        (c.find(" -e ") != std::string::npos || c.find(" -c ") != std::string::npos ||
+         c.find("--exec") != std::string::npos)) return true;
+    static const char* pats[] = {
+        "bash -c", "sh -c",
+        "python -c", "python3 -c",
+        "perl -e", "ruby -e", "node -e",
+        "eval ", "source ", ". /",
+        nullptr
+    };
+    return c_has_any(c, pats);
+}
+
+static bool danger_secrets(const std::string& c) {
+    static const char* pats[] = {
+        "302_key", "api_key", "apikey",
+        ".ssh/", ".gnupg/", ".aws/", ".netrc", ".msmtprc", ".pgpass", ".env",
+        "id_rsa", "id_ed25519", "id_dsa", "id_ecdsa",
+        ".bash_history", ".my.cnf", ".git-credentials", "credentials",
+        nullptr
+    };
+    return c_has_any(c, pats);
+}
+
+static const std::unordered_set<std::string> FIRE_SAFE_CMDS = {
+    "ls","cat","head","tail","wc","grep","egrep","fgrep","rg","awk","sed",
+    "sort","uniq","cut","tr","nl","column","diff","cmp","patch","test","[",
+    "find","tree","file","stat","readlink","realpath","which","type","command",
+    "md5sum","sha1sum","sha256sum","cksum","base64","xxd","od","hexdump",
+    "echo","printf","pwd","date","whoami","id","uname","df","du","free",
+    "uptime","ps","pgrep","sleep","timeout","true","false","env","set","export","unset",
+    "mkdir","touch","cp","mv","ln","install",
+    "g++","gcc","clang++","clang","cc","c++","make","cmake","ninja",
+    "git","tar","gzip","gunzip","bzip2","bunzip2","xz","unxz","zip","unzip",
+    "curl","wget","ping","dig","nslookup","host",
+    "sw_chat"
+};
+
+static std::string fire_first_token(const std::string& cmd) {
+    std::string c; c.reserve(cmd.size());
+    bool prev_space = true;
+    for (char ch : cmd) {
+        if (ch == '\n' || ch == '\r' || ch == '\t') {
+            if (!prev_space) c += ' ';
+            prev_space = true; continue;
+        }
+        if (ch == ' ') { if (!prev_space) c += ' '; prev_space = true; continue; }
+        c += ch; prev_space = false;
+    }
+    size_t i = 0;
+    while (i < c.size()) {
+        while (i < c.size() && c[i] == ' ') ++i;
+        if (i >= c.size()) break;
+        size_t sp = c.find(' ', i);
+        std::string tok = (sp == std::string::npos) ? c.substr(i) : c.substr(i, sp - i);
+        size_t eq = tok.find('=');
+        bool is_assign = false;
+        if (eq != std::string::npos && eq > 0) {
+            bool ok = true;
+            for (size_t j = 0; j < eq; ++j) {
+                char ch = tok[j];
+                if (!((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') ||
+                      (ch >= '0' && ch <= '9') || ch == '_')) { ok = false; break; }
+            }
+            is_assign = ok;
+        }
+        if (!is_assign) {
+            std::string lo; lo.reserve(tok.size());
+            for (char ch : tok) lo += static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+            size_t slash = lo.rfind('/');
+            if (slash != std::string::npos) lo = lo.substr(slash + 1);
+            return lo;
+        }
+        if (sp == std::string::npos) break;
+        i = sp + 1;
+    }
+    return "";
+}
+
+static bool fire_needs_confirm(const std::string& bash_code) {
+    const std::string c = danger_canon(bash_code);
+    const int L = G.fire_level;
+
+    if (danger_hardstop(c))        return true;
+    if (L < 1)                     return false;
+    if (danger_system(c))          return true;
+    if (L < 2)                     return false;
+    if (danger_exfil_remote(c))    return true;
+    if (L < 3)                     return false;
+    if (danger_secrets(c))         return true;
+    if (L < 4)                     return false;
+    if (bash_code.find("$(")  != std::string::npos) return true;
+    if (bash_code.find('`')   != std::string::npos) return true;
+    if (L < 5)                     return false;
+
+    std::string cur;
+    auto check_seg = [](const std::string& seg) -> bool {
+        std::string first = fire_first_token(seg);
+        if (first.empty()) return true;
+        return FIRE_SAFE_CMDS.find(first) != FIRE_SAFE_CMDS.end();
+    };
+    for (size_t k = 0; k < bash_code.size(); ++k) {
+        char ch = bash_code[k];
+        if (ch == ';' || ch == '|' || ch == '&' || ch == '\n') {
+            if (!check_seg(cur)) return true;
+            cur.clear();
+        } else if (ch != '\r') {
+            cur += ch;
+        }
+    }
+    if (!cur.empty() && !check_seg(cur)) return true;
     return false;
 }
 
@@ -1526,15 +1752,17 @@ std::string execute_single_bash(const std::string &bash_code, int idx, int total
 
     // FIRE: выполняем молча; опасные команды — исключение.
     if (G.fire) {
-        if (looks_dangerous(bash_code)) {
-            std::cout << C_RED << C_BOLD
-                      << "⚠ FIRE: похоже на опасную команду. Всё равно выполнить? "
-                      << C_RESET << std::flush;
-            char* rl = readline(C_RED "(y/n) " C_RESET);
-            std::string ans = rl ? std::string(rl) : std::string();
-            if (rl) free(rl);
-            if (!(ans == "y" || ans == "Y" || ans == "д" || ans == "Д")) {
-                std::cout << C_RED << "[FIRE: опасная команда отклонена]" << C_RESET << std::endl;
+        if (fire_needs_confirm(bash_code)) {
+            // Показываем саму команду — иначе пользователь не понимает,
+            // ЧТО именно он одобряет или отклоняет.
+            std::cout << std::endl << C_RED << C_BOLD
+                      << "⚠ FIRE: подозрительная команда" << C_RESET << std::endl;
+            std::cout << C_GRAY << "--- команда ---" << C_RESET << std::endl;
+            std::cout << C_CODE_FG << bash_code << C_RESET << std::endl;
+            std::cout << C_GRAY << "--- конец ---" << C_RESET << std::endl;
+            std::cout << C_RED << "Всё равно выполнить? " << C_RESET << std::flush;
+            if (ask_yes_no(C_RED "(y/n) " C_RESET) != 1) {
+                std::cout << C_RED << "[FIRE: подозрительная команда отклонена]" << C_RESET << std::endl;
                 return "[Пользователь отказался выполнять эту команду]";
             }
         }
@@ -1554,12 +1782,10 @@ std::string execute_single_bash(const std::string &bash_code, int idx, int total
                 ? C_YELLOW "[Выполнить команду? (y/n/a-все|д/н/в)]: " C_RESET
                 : C_YELLOW "[Выполнить команду? (y/n | д/н)]: " C_RESET;
         }
-        char *rl = readline(prompt);
-        if (!rl) return "[Пользователь отказался выполнять эту команду]";
-        std::string ans(rl); free(rl);
-        if (total > 1 && (ans == "a" || ans == "A" || ans == "в" || ans == "В")) {
+        int rc = ask_yes_no(prompt, /*allow_all=*/(total > 1));
+        if (rc == 2) {
             local_autorun = true;
-        } else if (ans != "y" && ans != "Y" && ans != "д" && ans != "Д") {
+        } else if (rc != 1) {
             if (!is_compact())
                 std::cout << C_RED << "[Блок " << (idx+1) << " пропущен]" << C_RESET << std::endl;
             return "[Пользователь отказался выполнять эту команду]";
@@ -1593,41 +1819,40 @@ std::string execute_single_bash(const std::string &bash_code, int idx, int total
     const char* stat_color = interrupted ? C_YELLOW
                            : (er.exit_code == 0 ? C_GREEN : C_RED);
 
-    if (G.fire) {
-        // FIRE: ни строчки про bash (код/результат/статус)
-    } else if (is_compact()) {
-        if (!G.nores && !result.empty()) {
-            // Вывод команды видим — печатаем как есть (сам вывод = обратная связь).
-            std::cout << result;
-            if (result.back() != char(10)) std::cout << char(10);
-        } else if (interrupted) {
-            // Молчим на штатный успех — сообщаем только о проблемах.
-            std::cout << C_YELLOW << "[прервано]" << C_RESET << std::endl;
-        } else if (er.timed_out) {
-            std::cout << C_YELLOW << "[таймаут]" << C_RESET << std::endl;
-        } else if (er.exit_code != 0) {
-            std::cout << C_RED << "[exit " << er.exit_code << "]" << C_RESET << std::endl;
+    // В FIRE — полное молчание про bash (код/результат/статус).
+    // Вне FIRE — либо компакт, либо полный вывод. nores глушит только вывод
+    // тела команды, но статус (exit/таймаут/прервано) остаётся видимым.
+    if (!G.fire) {
+        if (is_compact()) {
+            if (!G.nores && !result.empty()) {
+                std::cout << result;
+                if (result.back() != char(10)) std::cout << char(10);
+            } else if (interrupted) {
+                std::cout << C_YELLOW << "[прервано]" << C_RESET << std::endl;
+            } else if (er.timed_out) {
+                std::cout << C_YELLOW << "[таймаут]" << C_RESET << std::endl;
+            } else if (er.exit_code != 0) {
+                std::cout << C_RED << "[exit " << er.exit_code << "]" << C_RESET << std::endl;
+            }
+        } else {
+            if (!G.nores) {
+                if (empty_out && !interrupted && !er.timed_out && er.exit_code == 0)
+                    std::cout << C_BLUE << "[Результат]: (пусто)" << C_RESET << std::endl;
+                else
+                    std::cout << C_BLUE << "[Результат]:\n" << result << C_RESET << std::endl;
+            }
+            char dur[32];
+            snprintf(dur, sizeof(dur), "%.2fс", er.duration_sec);
+            std::string state;
+            if (interrupted)          state = "прервано";
+            else if (er.timed_out)    state = "таймаут";
+            else if (empty_out)       state = "нет вывода";
+            else                      state = std::to_string(body.size()) + " байт";
+            std::cout << C_GRAY << "[готово: exit " << C_RESET
+                      << stat_color << er.exit_code << C_RESET
+                      << C_GRAY << " · " << state << " · " << dur << "]"
+                      << C_RESET << std::endl;
         }
-        // exit 0 без таймаута/прерывания — ничего не печатаем (шум не нужен).
-    } else {
-        // Полный (некомпактный) режим: результат + подробная статусная строка.
-        if (!G.nores) {
-            if (empty_out && !interrupted && !er.timed_out && er.exit_code == 0)
-                std::cout << C_BLUE << "[Результат]: (пусто)" << C_RESET << std::endl;
-            else
-                std::cout << C_BLUE << "[Результат]:\n" << result << C_RESET << std::endl;
-        }
-        char dur[32];
-        snprintf(dur, sizeof(dur), "%.2fс", er.duration_sec);
-        std::string state;
-        if (interrupted)          state = "прервано";
-        else if (er.timed_out)    state = "таймаут";
-        else if (empty_out)       state = "нет вывода";
-        else                      state = std::to_string(body.size()) + " байт";
-        std::cout << C_GRAY << "[готово: exit " << C_RESET
-                  << stat_color << er.exit_code << C_RESET
-                  << C_GRAY << " · " << state << " · " << dur << "]"
-                  << C_RESET << std::endl;
     }
     return result;
 }
@@ -1690,9 +1915,39 @@ static int curl_progress_cb(void* /*clientp*/, curl_off_t /*dltotal*/, curl_off_
     return g_stream_abort ? 1 : 0;
 }
 
+// RAII для popen: Pike/Pclose. Гарантирует pclose даже при раннем return.
+struct PopenDeleter { void operator()(FILE* f) const { if (f) pclose(f); } };
+using PopenPtr = std::unique_ptr<FILE, PopenDeleter>;
+
+// RAII для libcurl: гарантирует cleanup/free_all даже при исключениях
+// и на ранних return. См. do_api_request / cmd_update / refresh_models_from_api.
+struct CurlDeleter  { void operator()(CURL* c) const        { if (c) curl_easy_cleanup(c);    } };
+struct SlistDeleter { void operator()(curl_slist* l) const  { if (l) curl_slist_free_all(l);  } };
+using CurlPtr  = std::unique_ptr<CURL, CurlDeleter>;
+using SlistPtr = std::unique_ptr<curl_slist, SlistDeleter>;
+
 // ──────────────────── Директории и конфиг ────────────────────
 // Рекурсивно создаёт директорию вместе с родителями (аналог `mkdir -p`).
 // Нужно для портируемости: на Linux ~/.config может отсутствовать.
+// Атомарная запись: сначала пишем во временный файл рядом, затем rename(2).
+// rename в пределах одной FS атомарен: либо читатель видит старую версию,
+// либо сразу новую — «полубитого» JSON не остаётся (важно для config/history).
+static bool atomic_write_file(const std::string& path, const std::string& data) {
+    std::string tmp = path + ".tmp";
+    {
+        std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
+        if (!f.is_open()) return false;
+        f.write(data.data(), static_cast<std::streamsize>(data.size()));
+        f.flush();
+        if (!f.good()) { f.close(); std::remove(tmp.c_str()); return false; }
+    }
+    if (std::rename(tmp.c_str(), path.c_str()) != 0) {
+        std::remove(tmp.c_str());
+        return false;
+    }
+    return true;
+}
+
 static void ensure_dir(const std::string& path) {
     if (path.empty()) return;
     struct stat st;
@@ -1728,6 +1983,7 @@ static void save_config() {
         j["autorun"]=G.autorun; j["history_enabled"]=G.history_enabled; j["nores"]=G.nores;
         j["compact_mode"]=G.compact_mode;
         j["fire"]=G.fire;
+        j["fire_level"]=G.fire_level;
         j["time_prefix"]=G.time_prefix;
         j["voice_in"]=G.voice_in; j["voice_out"]=G.voice_out;
         j["voice_lang"]=G.voice_lang; j["voice_region"]=G.voice_region;
@@ -1737,19 +1993,32 @@ static void save_config() {
         j["api_base"]=G.api_base;
         j["aliases"]=G.aliases;
         j["session_name"]=G.session_name;
-        std::ofstream f(CONFIG_FILE); if(f.is_open()) f << j.dump(2);
-    } catch(...){}
+        atomic_write_file(CONFIG_FILE, j.dump(2));
+    } catch (const std::exception& e) {
+        std::cerr << C_YELLOW << "[config: не удалось сохранить: " << e.what()
+                  << "]" << C_RESET << std::endl;
+    }
 }
 static void load_config() {
-    std::ifstream f(CONFIG_FILE); if(!f.is_open()) return;
+    std::ifstream f(CONFIG_FILE);
+    if (!f.is_open()) return;
     try {
         std::string c((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
-        if(c.empty()) return; json j = json::parse(c);
-        if(j.count("model")) G.model=j["model"]; if(j.count("temperature")) G.temperature=j["temperature"];
-        if(j.count("max_tokens")) G.max_tokens=j["max_tokens"]; if(j.count("autorun")) G.autorun=j["autorun"];
-        if(j.count("history_enabled")) G.history_enabled=j["history_enabled"]; if(j.count("nores")) G.nores=j["nores"];
+        if (c.empty()) return;
+        json j = json::parse(c);
+        if (j.count("model"))       G.model       = j["model"];
+        if (j.count("temperature")) G.temperature = j["temperature"];
+        if (j.count("max_tokens"))  G.max_tokens  = j["max_tokens"];
+        if (j.count("autorun"))     G.autorun     = j["autorun"];
+        if (j.count("history_enabled")) G.history_enabled = j["history_enabled"];
+        if (j.count("nores"))       G.nores       = j["nores"];
         if(j.count("compact_mode")) G.compact_mode=j["compact_mode"];
         if(j.count("fire")) G.fire=j["fire"];
+        if(j.count("fire_level") && j["fire_level"].is_number_integer()) {
+            G.fire_level = j["fire_level"].get<int>();
+            if (G.fire_level < 0) G.fire_level = 0;
+            if (G.fire_level > 5) G.fire_level = 5;
+        }
         if(j.count("time_prefix")) G.time_prefix=j["time_prefix"];
         if(j.count("voice_in")) G.voice_in=j["voice_in"];
         if(j.count("voice_out")) G.voice_out=j["voice_out"];
@@ -1766,7 +2035,11 @@ static void load_config() {
         if(j.count("aliases")) G.aliases=j["aliases"].get<std::unordered_map<std::string,std::string>>();
         if(j.count("session_name") && j["session_name"].is_string())
             G.session_name = j["session_name"].get<std::string>();
-    } catch(...){}
+    } catch (const std::exception& e) {
+        // Тихая потеря конфига — раньше пользователь не узнавал о поломке.
+        std::cerr << C_YELLOW << "[config: не удалось прочитать " << CONFIG_FILE
+                  << ": " << e.what() << " — используются дефолты]" << C_RESET << std::endl;
+    }
 }
 static void switch_session(const std::string& name) {
     if (G.history_enabled) save_history(true);
@@ -2194,8 +2467,10 @@ static int resolve_model_arg(const std::string& arg, std::string& resolved, std:
 // Возвращает готовую строку-промпт с \001..\002 (невидимая для readline разметка).
 static std::string build_prompt() {
     // compact: minimal prompt, no context bar / hints
-    if (is_compact())
-        return "\001\033[32m\002\xe2\x9d\xaf \001\033[0m\002";
+    if (is_compact()) {
+        std::string pfx = "\001\033[32m\002\xe2\x9d\xaf \001" C_INPUT "\002";
+        return pfx;
+    }
 
     size_t chars = 0;
     int msgs = 0;
@@ -2228,7 +2503,7 @@ static std::string build_prompt() {
     p += " \xc2\xb7 ~" + std::to_string(approx_tokens_messages()) + " tok";
     p += "\001"; p += C_RESET;  p += "\002"; p += "\n";
     p += "\001"; p += C_BOLD;   p += C_GREEN; p += "\002"; p += "\xe2\x9d\xaf "; // ❯
-    p += "\001"; p += C_RESET;  p += "\002";
+    p += "\001"; p += C_INPUT;  p += "\002";
     return p;
 }
 
@@ -2238,7 +2513,7 @@ static std::string moscow_now_str() {
     std::time_t m = t + 3 * 3600;
     std::tm msk{};
     gmtime_r(&m, &msk);
-    char buf[32];
+    char buf[64];
     std::snprintf(buf, sizeof(buf), "%02d.%02d.%04d %02d:%02d:%02d",
                   msk.tm_mday, msk.tm_mon + 1, msk.tm_year + 1900,
                   msk.tm_hour, msk.tm_min, msk.tm_sec);
@@ -2249,7 +2524,8 @@ std::string do_api_request(bool &aborted) {
     aborted = false;
     std::string api_key = get_api_key();
     if (api_key.empty()) return "";
-    CURL *curl = curl_easy_init();
+    CurlPtr curl_owner(curl_easy_init());
+    CURL *curl = curl_owner.get();
     if (!curl) return "";
     smart_trim_context();
 
@@ -2286,10 +2562,19 @@ std::string do_api_request(bool &aborted) {
     std::string jsonData = jData.dump(-1, ' ', false, json::error_handler_t::replace);
     std::string chat_url = normalize_api_base(G.api_base) + "/v1/chat/completions";
 
-    struct curl_slist *headers = nullptr;
-    headers = curl_slist_append(headers, "Content-Type: application/json");
-    std::string auth = "Authorization: Bearer " + api_key;
-    headers = curl_slist_append(headers, auth.c_str());
+    // ВАЖНО: curl_slist_append(head, ...) возвращает ТОТ ЖЕ head.
+    // unique_ptr::reset(p) освобождает старое значение через deleter, даже
+    // если p совпадает со старым — поэтому нельзя делать reset(append(get())).
+    // Правильно: собрать список "голым", затем один раз передать владение.
+    SlistPtr headers_owner;
+    {
+        struct curl_slist* raw =
+            curl_slist_append(nullptr, "Content-Type: application/json");
+        std::string auth = "Authorization: Bearer " + api_key;
+        raw = curl_slist_append(raw, auth.c_str());
+        headers_owner.reset(raw);
+    }
+    struct curl_slist *headers = headers_owner.get();
 
     struct StreamState {
         std::string full_content;
@@ -2348,7 +2633,7 @@ std::string do_api_request(bool &aborted) {
             jsonLocal = jL.dump(-1, ' ', false, json::error_handler_t::replace);
         }
 
-        int retries = 3; long backoff = 2; bool ok = false;
+        int retries = API_MAX_RETRIES; long backoff = API_RETRY_BACKOFF_S; bool ok = false;
         while (retries-- > 0) {
             st.full_content.clear();
             st.retry_after = -1;
@@ -2363,8 +2648,8 @@ std::string do_api_request(bool &aborted) {
             curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION,
                              static_cast<size_t(*)(char*,size_t,size_t,void*)>(header_cb));
             curl_easy_setopt(curl, CURLOPT_HEADERDATA, &st);
-            curl_easy_setopt(curl, CURLOPT_TIMEOUT, 420L);
-            curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 15L);
+            curl_easy_setopt(curl, CURLOPT_TIMEOUT, CURL_TOTAL_TIMEOUT_S);
+            curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, CURL_CONNECT_TIMEOUT_S);
             curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
             // Включаем progress-колбэк — он позволяет прервать запрос
             // по Ctrl+C ещё до прихода первых байт ответа.
@@ -2390,14 +2675,14 @@ std::string do_api_request(bool &aborted) {
                 break;
             }
             long wait_s = backoff;
-            if (st.retry_after > 0 && st.retry_after <= 60) wait_s = st.retry_after;
+            if (st.retry_after > 0 && st.retry_after <= API_MAX_RETRY_AFTER_S) wait_s = st.retry_after;
             if (!is_compact())
                 std::cout << "\r\033[2K" << C_YELLOW << "[Ошибка сети, повтор через "
                           << wait_s << "с... (Ctrl+C — отмена)]" << C_RESET << std::flush;
             // Дробим паузу на слайсы по 200 мс — Ctrl+C прерывает ожидание сразу.
             {
                 bool aborted_wait = false;
-                for (long ms = 0; ms < wait_s * 1000; ms += 200) {
+                for (long ms = 0; ms < wait_s * 1000; ms += POLL_SLICE_MS) {
                     if (g_stream_abort) { aborted_wait = true; break; }
                     std::this_thread::sleep_for(std::chrono::milliseconds(200));
                 }
@@ -2442,9 +2727,9 @@ std::string do_api_request(bool &aborted) {
 
     bool was_aborted = false;
     { std::lock_guard<std::mutex> lock(g_stream_mutex); if (g_stream_abort) { was_aborted = true; g_stream_abort = 0; } }
-    if (was_aborted) { aborted = true; if (!is_compact()) std::cout << "\n" << C_YELLOW << "[Запрос прерван]" << C_RESET << std::endl; curl_slist_free_all(headers); curl_easy_cleanup(curl); return ""; }
-    if (res != CURLE_OK) { std::cerr << C_RED << "curl: " << curl_easy_strerror(res) << C_RESET << std::endl; curl_slist_free_all(headers); curl_easy_cleanup(curl); return ""; }
-    if (http_code != 200) { std::cerr << C_RED << "[HTTP " << http_code << "] " << state.full_content.substr(0, 300) << C_RESET << std::endl; curl_slist_free_all(headers); curl_easy_cleanup(curl); return ""; }
+    if (was_aborted) { aborted = true; if (!is_compact()) std::cout << "\n" << C_YELLOW << "[Запрос прерван]" << C_RESET << std::endl; return ""; }
+    if (res != CURLE_OK) { std::cerr << C_RED << "curl: " << curl_easy_strerror(res) << C_RESET << std::endl; return ""; }
+    if (http_code != 200) { std::cerr << C_RED << "[HTTP " << http_code << "] " << state.full_content.substr(0, 300) << C_RESET << std::endl; return ""; }
 
     // Информируем пользователя, если реально отвечала fallback-модель
     if (used_model != G.model && !is_compact()) {
@@ -2453,20 +2738,39 @@ std::string do_api_request(bool &aborted) {
     }
 
     {
+        bool json_ok = false;
         try {
             json j = json::parse(state.full_content);
+            json_ok = true;
             if (j.count("choices") && !j["choices"].empty()) {
                 auto& choice = j["choices"][0];
                 if (choice.count("message") && choice["message"].count("content"))
                     state.full_content = choice["message"]["content"].get<std::string>();
+            } else if (j.count("error")) {
+                // OpenRouter/302 кладут ошибку в {"error": {...}} при HTTP 200.
+                std::string emsg = j["error"].is_string()
+                    ? j["error"].get<std::string>()
+                    : j["error"].value("message", std::string("unknown error"));
+                state.full_content = "[Ошибка API: " + emsg + "]";
             }
             if (j.count("usage")) {
                 G.total_prompt_tokens += j["usage"].value("prompt_tokens", 0);
                 G.total_completion_tokens += j["usage"].value("completion_tokens", 0);
             }
-        } catch (...) {}
+        } catch (const json::parse_error& e) {
+            // 200, но не-JSON: HTML-капча, plain-текст прокси и т.п.
+            std::string head = state.full_content.substr(0, 200);
+            // Заменяем управляющие символы, чтобы не сломать рендер.
+            for (char& ch : head) if ((unsigned char)ch < 0x20 && ch != '\n' && ch != '\t') ch = '?';
+            std::string msg = "[Ответ API не является JSON (HTTP " +
+                              std::to_string(http_code) + "): " + head + "]";
+            if (!is_compact())
+                std::cerr << C_RED << "[parse: " << e.what() << "]" << C_RESET << std::endl;
+            return msg;
+        }
+        if (!json_ok) return "";
     }
-    curl_slist_free_all(headers); curl_easy_cleanup(curl);
+    
     return sanitize_utf8(state.full_content);
 }
 
@@ -2481,10 +2785,7 @@ void process_response(const std::string &content, bool aborted, size_t msgs_befo
         const char* prompt = is_compact()
             ? C_YELLOW "(y/n) " C_RESET
             : C_YELLOW "[Ответ прерван. Сохранить в историю? (y/n | д/н)]: " C_RESET;
-        char *rl_ans = readline(prompt);
-        std::string ans;
-        if (rl_ans) { ans = std::string(rl_ans); free(rl_ans); }
-        if (ans != "y" && ans != "Y" && ans != "д" && ans != "Д") {
+        if (ask_yes_no(prompt) != 1) {
             if (msgs_before > 0 && msgs_before <= G.messages.size()) {
                 G.messages.resize(msgs_before);
             } else if (!G.messages.empty() && G.messages.back().value("role", "") == "user") {
@@ -2696,7 +2997,7 @@ void process_response(const std::string &content, bool aborted, size_t msgs_befo
     }
 
     // Автосохранение: пишем всегда, уведомляем раз в 24 сообщения
-    if (G.history_enabled && G.messages.size() > 2) save_history(G.messages.size() % 24 != 0);
+    if (G.history_enabled && G.messages.size() > 2) save_history(G.messages.size() % HISTORY_NOTIFY_EVERY != 0);
 }
 
 // ─────────────────────────── Команды ──────────────────────────
@@ -2729,10 +3030,30 @@ void cmd_update() {
     std::string cur_bin = find_current_bin();
     std::cout << C_GRAY << "[update] Текущий бинарник: " << cur_bin << C_RESET << std::endl;
 
+    // Единый источник истины: где лежит локальный исходник.
+    // Ищем первый существующий из типичных мест; если ничего нет — вернём
+    // путь по умолчанию (первый кандидат). Тот же путь используется для
+    // записи нового исходника в шаге 7c, чтобы diff и запись не расходились.
+    auto local_src_path = [&home]() -> std::string {
+        std::vector<std::string> cands = {
+            home + "/tmp/sw_chat.cpp",
+            home + "/sw_chat.cpp",
+            home + "/tmp/sw_chat.cpp.bak",
+            home + "/sw_chat.cpp.bak"
+        };
+        for (auto& pth : cands) {
+            if (access(pth.c_str(), R_OK) == 0) return pth;
+        }
+        return home + "/tmp/sw_chat.cpp";
+    };
+    const std::string src_path_local = local_src_path();
+    std::cout << C_GRAY << "[update] Локальный исходник: " << src_path_local << C_RESET << std::endl;
+
     // 1. Скачать новый исходник
     std::cout << C_YELLOW << "[update] Скачиваю обновление..." << C_RESET << std::endl;
 
-    CURL *curl = curl_easy_init();
+    CurlPtr curl_owner(curl_easy_init());
+    CURL *curl = curl_owner.get();
     if (!curl) {
         std::cerr << C_RED << "[update: curl init failed]" << C_RESET << std::endl;
         return;
@@ -2748,7 +3069,7 @@ void cmd_update() {
     CURLcode res = curl_easy_perform(curl);
     long http_code = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
-    curl_easy_cleanup(curl);
+    // (RAII: cleanup автоматически)
 
     if (res != CURLE_OK) {
         std::cerr << C_RED << "[update: download failed: " << curl_easy_strerror(res) << "]" << C_RESET << std::endl;
@@ -2824,16 +3145,10 @@ void cmd_update() {
     {
         std::string local_src;
         {
-            // try common locations
-            std::vector<std::string> cands = {
-                home + "/tmp/sw_chat.cpp",
-                home + "/sw_chat.cpp"
-            };
-            for (auto& pth : cands) {
-                std::ifstream lf(pth);
-                if (!lf.is_open()) continue;
-                local_src.assign((std::istreambuf_iterator<char>(lf)), std::istreambuf_iterator<char>());
-                if (!local_src.empty()) break;
+            std::ifstream lf(src_path_local);
+            if (lf.is_open()) {
+                local_src.assign((std::istreambuf_iterator<char>(lf)),
+                                 std::istreambuf_iterator<char>());
             }
         }
         auto interesting = [](const std::string& line) -> bool {
@@ -2889,10 +3204,7 @@ void cmd_update() {
         const char* upd_prompt = is_compact()
             ? C_YELLOW "(y/n) " C_RESET
             : C_YELLOW "[update] Установить обновление? (y/n | д/н): " C_RESET;
-        char *rl_ans = readline(upd_prompt);
-        std::string ans;
-        if (rl_ans) { ans = std::string(rl_ans); free(rl_ans); }
-        if (ans != "y" && ans != "Y" && ans != "д" && ans != "Д") {
+        if (ask_yes_no(upd_prompt) != 1) {
             std::cout << C_GRAY << "[update] Обновление отменено пользователем]" << C_RESET << std::endl;
             return;
         }
@@ -2917,11 +3229,13 @@ void cmd_update() {
         + shell_escape(new_bin) + " " + shell_escape(new_src) + " -lreadline -lcurl -lpthread 2>&1";
     std::string compile_out;
     {
-        FILE *pipe = popen(compile_cmd.c_str(), "r");
+        PopenPtr pipe(popen(compile_cmd.c_str(), "r"));
         if (pipe) {
             char buf[256];
-            while (fgets(buf, sizeof(buf), pipe)) compile_out += buf;
-            int status = pclose(pipe);
+            while (fgets(buf, sizeof(buf), pipe.get())) compile_out += buf;
+        }
+        {
+            int status = pclose(pipe.release());   // release → pclose мы вызываем сами
             if (status != 0) {
                 std::cerr << C_RED << "[update: компиляция не удалась]" << C_RESET << std::endl;
                 std::cerr << compile_out << std::endl;
@@ -2957,7 +3271,7 @@ void cmd_update() {
     //    - бинарь подменяем атомарным mv;
     //    - исходник копируем (не mv) — исходник остаётся для диффов/бэкапа.
     std::string old_bin = cur_bin + ".old";
-    std::string src_path = home + "/sw_chat.cpp";
+    std::string src_path = src_path_local;
 
     auto run = [](const std::string& cmd) -> int { return system(cmd.c_str()); };
 
@@ -3032,7 +3346,9 @@ void cmd_about() {
     std::cout << "  History:  " << (G.history_enabled ? C_GREEN "вкл" : C_RED "выкл") << C_RESET << std::endl;
     std::cout << "  NoRes:    " << (G.nores ? C_RED "вкл" : C_GREEN "выкл") << " (скрытие вывода bash)" << C_RESET << std::endl;
     std::cout << "  Compact:  " << (G.compact_mode ? C_GREEN "вкл" : C_RED "выкл") << C_RESET << std::endl;
-    std::cout << "  FIRE:     " << (G.fire ? C_RED "ВКЛ 🔥" : C_GRAY "выкл") << C_RESET << std::endl;
+    std::cout << "  FIRE:     "
+              << (G.fire ? C_RED "ВКЛ 🔥 (level " + std::to_string(G.fire_level) + ")" : C_GRAY "выкл")
+              << C_RESET << std::endl;
     std::cout << "  Time:     " << (G.time_prefix ? C_GREEN "вкл" : C_GRAY "выкл") << C_RESET << " (дата-время МСК в начале запроса)" << std::endl;
     std::cout << "  API base: " << C_GREEN << normalize_api_base(G.api_base) << C_RESET << std::endl;
 
@@ -3530,8 +3846,15 @@ void print_help(bool full = false) {
         << "  /nores             — вкл/выкл вывод результатов bash\n"
         << "  /time on|off       — добавлять дату-время (МСК) в начало каждого запроса к модели\n"
         << "                       (модель видит дату-время; на экран ничего не выводится)\n"
-        << "  /FIRE [on|off|blast] — тихий bash: скрыть код+вывод+bash-блок, autorun вкл\n"
-        << "                       on=вкл; off=выкл (autorun тоже выкл); blast — аварийный выход\n"
+        << "  /FIRE [N|on|off|blast] — тихий bash: скрыть код+вывод+bash-блок, autorun вкл\n"
+        << "                       N=0..5 — уровень фильтра опасных команд (по умолчанию 3):\n"
+        << "                          0 — только катастрофа (rm -rf /, mkfs, dd of=/dev)\n"
+        << "                          1 — + системные каталоги, chmod/chown /, shutdown\n"
+        << "                          2 — + эксфильтрация (curl/wget upload), remote-exec\n"
+        << "                          3 — + секретные пути (.ssh, *key, .env) [дефолт]\n"
+        << "                          4 — + подстановки $() и бэктики\n"
+        << "                          5 — + whitelist (максимум паранойи)\n"
+        << "                       on=вкл level 3; off=выкл (autorun тоже); blast — аварийный выход\n"
         << "  /dryrun            — вкл/выкл dry-run bash-блоков (не выполнять, только показывать)\n"
         << "  /compact           — тихий режим (plain, без подсказок/spinner)\n"
         << "  /cost [live]       — стоимость токенов ($); live — подтянуть цены API\n"
@@ -3890,7 +4213,7 @@ static bool get_user_input(std::string &out) {
 
         std::string prompt = first_line
             ? build_prompt()
-            : ("\001" C_GREEN "\002" + std::to_string(line_num) + "\xe2\x80\xa6 \001" C_RESET "\002");
+            : ("\001" C_GREEN "\002" + std::to_string(line_num) + "\xe2\x80\xa6 \001" C_INPUT "\002");
 
         // Голосовой ввод: распознаём речь → подставляем текст в readline
         // (можно отредактировать или сразу нажать Enter).
@@ -3925,6 +4248,7 @@ static bool get_user_input(std::string &out) {
         std::cout.flush(); fflush(stdout); // Сброс буферов перед readline
         rl_startup_hook = voice_prefill_hook;
         char *line = readline(prompt.c_str());
+        std::cout << C_RESET;  // сброс цвета ввода пользователя
         rl_startup_hook = nullptr;
         g_rl_prefill.clear();
 
@@ -4173,21 +4497,78 @@ int main(int argc, char *argv[]) {
     G.sys_prompt = load_system_prompt();
     if (G.sys_prompt.empty()) {
         G.sys_prompt =
-            "FIRE-режим (/FIRE on): bash-блоки выполняются АВТОМАТИЧЕСКИ и МОЛЧА — пользователь НЕ видит ни команду, ни результат. "
-            "В FIRE категорически избегай деструктивных и рискованных команд (rm -rf, mkfs, dd of=, перезапись /dev/*, fork-bomb, пайпы в sh/bash, chmod -R 777, git push --force): они могут необратимо что-то испортить без ведома пользователя. "
-            "Если такая команда действительно нужна — не выполняй её в FIRE: сначала напиши пользователю обычным текстом, что требуется /FIRE off и его явное согласие. "
-            "То, что ты выведешь после ```bash будет сразу исполняться в системе через функцию system();. "
-            "Используй максимально аккуратно, чтобы не навредить системе !!! "
-            "Всегда придерживайся правила: несколько bash-блоков могут быть в твоём ответе, все будут выполнены последовательно. "
-            "При выводе тобой bash-блока ничего больше не выводить, пока я разрешу или не разрешу. "
-            "Все инструкции, что указаны здесь выше ты должен постоянно помнить и не нарушать. "
-            "ЭТО ВАЖНО! Результат выполнения команды будет добавлен к твоему сообщению автоматически. "
-            "В САМОМ НАЧАЛЕ запросов пользователя может стоять строка вида "
-            "[Текущие дата и время (МСК, UTC+3): дд.мм.гггг чч:мм:сс] — это реальное текущее время пользователя. "
-            "Используй его для ориентации во времени: паузы между сообщениями, время суток у пользователя, "
-            "планирование взаимодействия в реальном времени и т.п. "
-            "В папке ~/tmp возможно будет файл memo.md это твоя память. "
-            "Если необходимо сделать запись в memo.md, то сохраняй самое важное, максимум три - пять строк, ДОПИСЫВАЯ в файл.";
+            "FIRE-режим активен. Работаешь с системой через bash-блоки, ведёшь память в файлах. Система: Ubuntu 18.04, i686, noGUI, слабый ПК (1 CPU, 235 MB RAM) — работай бережно.\n"
+            "\n"
+            "## FIRE-режим (основной режим работы)\n"
+            "Все bash-блоки исполняются АВТОМАТИЧЕСКИ и МОЛЧА. Пользователь НЕ видит ни команды, ни вывода.\n"
+            "- Начинай ответ сразу с блока bash. Без предисловий вроде «сейчас выполню», «проверяю», «вот результат».\n"
+            "- Результат блока приходит тебе сам в следующем сообщении как [Результат выполнения команды] и [exit N]. Планируй следующий шаг по нему.\n"
+            "- Одна логическая операция — один блок. Длинные серии — несколькими блоками подряд.\n"
+            "- Тексты для пользователя — только если без них непонятно, очень коротко.\n"
+            "- НИКОГДА в FIRE не выполняй разрушительные и необратимые команды: удаление корня или домашнего каталога, форматирование дисков, запись напрямую в блочные устройства, fork-bomb, глобальные chmod или chown, git push force, пайпы в sh или bash.\n"
+            "  Если такая команда реально нужна — остановись и напиши обычным текстом, что нужно отключить FIRE и получить явное согласие пользователя.\n"
+            "- Клиент сам спросит y/n на подозрительную команду. Если отклонил — не повторяй, ищи безопасный путь.\n"
+            "\n"
+            "## Уровни фильтра FIRE (/FIRE N)\n"
+            "Строгость фильтра опасных команд задаётся командой /FIRE N, где N = 0..5:\n"
+            "  0 — почти всё авто-выполняется; hard-stop только на катастрофе (rm -rf /, mkfs, dd of=/dev/*)\n"
+            "  1 — + системные каталоги, chmod/chown /, shutdown/reboot\n"
+            "  2 — + эксфильтрация (curl/wget upload), remote-exec (nc -e, bash -c, eval)\n"
+            "  3 — + секретные пути (.ssh, *key, .env, id_rsa, .bash_history, .gnupg) — дефолт\n"
+            "  4 — + командные подстановки $() и бэктики\n"
+            "  5 — + whitelist: 1-е слово каждого сегмента должно быть из списка безопасных команд\n"
+            "Уровень может быть повышен/понижен пользователем: ориентируйся на текущий.\n"
+            "Правило «разрушительные команды — только с явного согласия» остаётся твоим личным\n"
+            "принципом на любом уровне, даже если фильтр клиента молчит.\n"
+            "\n"
+            "## Как писать bash-блоки, безопасные для разбора\n"
+            "Клиент делит команду по разделителям точка-с-запятой, вертикальная черта, амперсанд, перевод строки, и проверяет первое слово каждого сегмента, а также наличие командных подстановок (знак доллара со скобкой) и обратных кавычек.\n"
+            "- Избегай этих символов внутри текста аргументов, иначе блок попадёт под вопрос y/n и может быть отклонён.\n"
+            "- Для многострочных текстов используй printf и одинарные кавычки, а не heredoc и не скрипты на питоне.\n"
+            "- Не используй командные подстановки и обратные кавычки — они всегда требуют подтверждения.\n"
+            "\n"
+            "## bash-блоки\n"
+            "- Всё после трех обратных кавычек с меткой bash исполняется через оболочку. Несколько блоков в ответе идут последовательно.\n"
+            "- После вывода блока bash больше ничего не пиши, пока не получишь его результат.\n"
+            "- Сначала смотри — ls, cat, grep, stat, file. Потом меняй.\n"
+            "- Перед изменением файлов — бэкап: cp file file.bak.ДАТА.\n"
+            "- Не создавай файлы без необходимости. Временные клади в /tmp.\n"
+            "\n"
+            "## ПАМЯТЬ: cache.md и memo.md (оба в ~/tmp)\n"
+            "\n"
+            "### cache.md — рабочий блокнот FIRE\n"
+            "Зачем: в FIRE пользователь не видит происходящего. Длинная задача легко теряет контекст между сообщениями. cache.md — бортовой журнал задачи.\n"
+            "Если файла нет — создай его через printf.\n"
+            "\n"
+            "Как работать с cache.md:\n"
+            "- В начале многошаговой задачи: запиши цель, план по шагам, известные факты.\n"
+            "- После каждого значимого шага: допиши блок из 3-5 строк — Сделано, Результат, Дальше, Важные пути и бэкапы.\n"
+            "- Перед возвратом к задаче после паузы или после сброса контекста — первым делом прочти cache.md.\n"
+            "- Держи файл короче 80 строк. Если длиннее — сожми старые шаги до одной строки, суть оставь.\n"
+            "- Формат краток: одно-два предложения на пункт, без воды.\n"
+            "- Секреты (ключи, пароли, токены) не храни.\n"
+            "\n"
+            "Пример структуры cache.md:\n"
+            "Цель — что делаем.\n"
+            "План — 3-7 шагов.\n"
+            "Статус — сколько шагов выполнено.\n"
+            "Сделано — ключевые шаги с результатами.\n"
+            "Дальше — следующий шаг.\n"
+            "Пути и бэкапы — что где лежит.\n"
+            "\n"
+            "### memo.md — долговременная память\n"
+            "Постоянные факты: пользователь, железо, ОС, привычки, проекты, версии.\n"
+            "- Не перезаписывай — только дописывай в конец.\n"
+            "- 3-5 строк максимум на запись, только важное.\n"
+            "- Перед записью прочти файл — не дублируй уже записанное.\n"
+            "- Секреты не храни.\n"
+            "\n"
+            "Правило разделения: cache.md — оперативный контекст текущей задачи, memo.md — долгосрочные факты между задачами.\n"
+            "\n"
+            "## ВРЕМЯ\n"
+            "В начале запроса может быть строка вида [Текущие дата и время (МСК, UTC+3): дд.мм.гггг чч:мм:сс] — это реальное время пользователя.\n"
+            "Используй его для оценки пауз, времени суток, планирования."
+;
         // Автосоздание редактируемого файла системного промпта (для правки).
         {
             std::ofstream sp_out(SYSTEM_PROMPT_FILE);
@@ -4295,8 +4676,8 @@ int main(int argc, char *argv[]) {
               << (G.autorun ? C_RED "ВКЛ ⚠" : C_GRAY "выкл") << C_RESET
               << C_GRAY << " (переключить: /autorun)" << C_RESET
               << C_GRAY << " FIRE: " << C_RESET
-              << (G.fire ? C_RED "ВКЛ 🔥" : C_GRAY "выкл") << C_RESET
-              << C_GRAY << " (/FIRE)" << C_RESET
+              << (G.fire ? C_RED "ВКЛ 🔥 L" + std::to_string(G.fire_level) : C_GRAY "выкл") << C_RESET
+              << C_GRAY << " (/FIRE N)" << C_RESET
               << C_GRAY << " Вывод результатов: " << (G.nores ? C_RED "выкл" : C_GREEN "вкл")
               << C_RESET;
     std::cout << C_GRAY   << " История: " << (G.history_enabled ? "вкл" : "выкл")
@@ -4385,44 +4766,77 @@ int main(int argc, char *argv[]) {
             std::string fa = command_arg(userAnswer, "/FIRE");
             while (!fa.empty() && fa[0] == ' ') fa.erase(0, 1);
             while (!fa.empty() && fa.back() == ' ') fa.pop_back();
+
+            auto level_desc = [](int L) -> const char* {
+                switch (L) {
+                    case 0: return "0 — только катастрофа (rm -rf /, mkfs, dd of=/dev...)";
+                    case 1: return "1 — + системные каталоги, chmod/chown /, shutdown";
+                    case 2: return "2 — + эксфильтрация (curl/wget upload), remote-exec (nc -e, bash -c)";
+                    case 3: return "3 — + секретные пути (.ssh, *key, .env, id_rsa) [дефолт]";
+                    case 4: return "4 — + подстановки $() и бэктики";
+                    case 5: return "5 — + whitelist: 1-е слово каждого сегмента из списка";
+                    default: return "?";
+                }
+            };
+            auto valid_level = [](const std::string& a, int& out) -> bool {
+                if (a.size() != 1 || a[0] < '0' || a[0] > '5') return false;
+                out = a[0] - '0';
+                return true;
+            };
+
+            int lv = 0;
             if (fa.empty()) {
                 std::cout << C_CYAN << "[FIRE: " << (G.fire ? "ВКЛ 🔥" : "ВЫКЛ")
+                          << " | level: " << (G.fire ? std::to_string(G.fire_level) : "—")
                           << " | autorun: " << (G.autorun ? "ВКЛ" : "выкл")
                           << "]" << C_RESET << std::endl;
+                std::cout << C_GRAY << "  " << level_desc(G.fire_level)
+                          << C_RESET << std::endl;
+                std::cout << C_GRAY << "  Уровни: /FIRE 0..5  |  /FIRE on (=3)  |  /FIRE off  |  /FIRE blast"
+                          << C_RESET << std::endl;
             } else if (fa == "on") {
-                // P0.1: FIRE — режим без подтверждения bash. Требуем осознанное "yes".
-                std::cout << C_RED << C_BOLD << "🔥 FIRE: ВКЛЮЧЕНИЕ ВЫПОЛНЯЕТСЯ БЕЗ ПОДТВЕРЖДЕНИЙ." << C_RESET << std::endl;
-                std::cout << C_RED
-                          << "  Все ```bash-блоки модели будут выполняться молча:\n"
-                          << "  - без показа кода команды;\n"
-                          << "  - без показа вывода;\n"
-                          << "  - без запроса y/n;\n"
-                          << "  - от имени текущего пользователя (доступ ко всем вашим файлам и ключам).\n"
-                          << C_RESET << std::endl;
-                std::cout << C_YELLOW
-                          << "  Включить только если понимаете риск. Введите ровно 'yes' для входа,\n"
-                          << "  что угодно другое — отмена." << C_RESET << std::endl;
-                char* fire_rl = readline(C_RED "FIRE> " C_RESET);
-                std::string fire_ans = fire_rl ? std::string(fire_rl) : std::string();
-                if (fire_rl) free(fire_rl);
-                while (!fire_ans.empty() && (fire_ans.back() == '\n' || fire_ans.back() == '\r' || fire_ans.back() == ' '))
-                    fire_ans.pop_back();
-                if (fire_ans != "yes") {
-                    std::cout << C_GREEN << "[FIRE: отменено, режим НЕ включён]" << C_RESET << std::endl;
-                    continue;
+                if (G.fire) {
+                    std::cout << C_YELLOW << "[FIRE уже включён, level " << G.fire_level
+                              << ". Сменить: /FIRE N]" << C_RESET << std::endl;
+                } else {
+                    std::cout << C_RED << C_BOLD << "🔥 FIRE: ВКЛЮЧЕНИЕ ВЫПОЛНЯЕТСЯ БЕЗ ПОДТВЕРЖДЕНИЙ (level 3)."
+                              << C_RESET << std::endl;
+                    std::cout << C_RED
+                              << "  Все ```bash-блоки модели будут выполняться молча:\n"
+                              << "  - без показа кода команды (кроме подозрительных);\n"
+                              << "  - без показа вывода;\n"
+                              << "  - от имени текущего пользователя (доступ к вашим файлам).\n"
+                              << C_RESET << std::endl;
+                    std::cout << C_GRAY << "  Фильтр уровня 3: " << level_desc(3) << C_RESET << std::endl;
+                    std::cout << C_YELLOW
+                              << "  Введите ровно 'yes' для входа, что угодно другое — отмена."
+                              << C_RESET << std::endl;
+                    char* fire_rl = readline(C_RED "FIRE> " C_RESET);
+                    std::string fire_ans = fire_rl ? std::string(fire_rl) : std::string();
+                    if (fire_rl) free(fire_rl);
+                    while (!fire_ans.empty() && (fire_ans.back() == '\n' ||
+                                                 fire_ans.back() == '\r' ||
+                                                 fire_ans.back() == ' '))
+                        fire_ans.pop_back();
+                    if (fire_ans != "yes") {
+                        std::cout << C_GREEN << "[FIRE: отменено, режим НЕ включён]" << C_RESET << std::endl;
+                        continue;
+                    }
+                    G.fire         = true;
+                    G.autorun      = true;
+                    G.compact_mode = true;
+                    G.fire_level   = 3;
+                    save_config();
+                    std::cout << C_RED << C_BOLD << "🔥 FIRE: ВКЛЮЧЁН (level 3)." << C_RESET << std::endl;
+                    std::cout << C_GRAY << "  Мягче: /FIRE 0..2  |  Строже: /FIRE 4|5  |  Выкл: /FIRE off"
+                              << C_RESET << std::endl;
                 }
-                G.fire = true;
-                G.autorun = true;
-                G.compact_mode = true;
-                save_config();
-                std::cout << C_RED << C_BOLD << "🔥 FIRE: ВКЛЮЧЁН." << C_RESET << std::endl;
-                std::cout << C_YELLOW << "  Выключить: /FIRE off   Аварийно: /FIRE blast"
-                          << C_RESET << std::endl;
             } else if (fa == "off") {
                 G.fire = false;
                 G.autorun = false;
                 save_config();
-                std::cout << C_GREEN << "[FIRE: выключен. Autorun тоже выключен.]" << C_RESET << std::endl;
+                std::cout << C_GREEN << "[FIRE: выключен. Autorun тоже выключен. Level сохранён: "
+                          << G.fire_level << "]" << C_RESET << std::endl;
             } else if (fa == "blast") {
                 G.fire = false;
                 G.autorun = false;
@@ -4435,8 +4849,27 @@ int main(int argc, char *argv[]) {
                 } else {
                     std::cout << C_GRAY << "  (команд пока не выполнялось)" << C_RESET << std::endl;
                 }
+            } else if (valid_level(fa, lv)) {
+                bool was_on = G.fire;
+                G.fire         = true;
+                G.autorun      = true;
+                G.compact_mode = true;
+                G.fire_level   = lv;
+                save_config();
+                std::cout << (lv >= 4 ? C_RED : (lv <= 1 ? C_GREEN : C_YELLOW)) << C_BOLD
+                          << "[FIRE: level " << lv << (was_on ? " (смена)" : " (включён)") << "] "
+                          << C_RESET
+                          << C_GRAY << level_desc(lv) << C_RESET << std::endl;
             } else {
-                std::cout << C_YELLOW << "[Использование: /FIRE [on|off|blast]]" << C_RESET << std::endl;
+                std::cout << C_YELLOW << "[Использование: /FIRE [0|1|2|3|4|5|on|off|blast]]"
+                          << C_RESET << std::endl;
+                std::cout << C_GRAY
+                          << "  0 — почти всё авто (hard-stop только на катастрофе)" << std::endl
+                          << "  1 — + системные разрушения" << std::endl
+                          << "  2 — + эксфильтрация и remote-exec" << std::endl
+                          << "  3 — + секретные пути (дефолт)" << std::endl
+                          << "  4 — + $() и бэктики" << std::endl
+                          << "  5 — + whitelist (максимальная паранойя)" << C_RESET << std::endl;
             }
             continue;
         }
