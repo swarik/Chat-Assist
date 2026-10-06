@@ -100,6 +100,28 @@ sw_chat — это программа для общения с искусств�
 и далее — как в быстром способе. Для голосовых команд дополнительно
 установите приложение **Termux:API**.
 
+### Windows (через WSL2)
+
+На Windows проще всего поставить **WSL2** и работать в нём — среда
+полностью совместима с Linux, и все возможности sw_chat (включая FIRE)
+работают как есть:
+
+    wsl --install -d Ubuntu
+
+После установки Ubuntu откройте терминал WSL и поставьте sw_chat как
+обычно:
+
+    curl -fsSL https://raw.githubusercontent.com/swarik/Chat-Assist/main/install.sh | bash
+
+Обновить WSL и убедиться, что установлена вторая версия:
+
+    wsl --update
+    wsl --set-default-version 2
+
+Нативной сборки под Windows (`sw_chat.exe`) пока нет — если она нужна,
+дайте знать через
+[Issues](https://github.com/swarik/Chat-Assist/issues).
+
 ---
 
 ## Первый запуск
