@@ -37,7 +37,7 @@
 
 using json = nlohmann::json;
 // ─────────────────────────── Версия ───────────────────────────
-#define APP_VERSION "1.4.23"
+#define APP_VERSION "1.4.24"
 
 
 // Emoji_Presentation: всегда отображается как emoji (ширина 2)
@@ -2315,11 +2315,11 @@ static void export_dialog(const std::string& arg) {
     else if(!arg.empty()){fmt=arg;}
     if(file.empty()) file = def_dir + "dialog_export." + fmt;
     else if(file[0]=='~') file = get_home_dir() + file.substr(1);
-    std::ofstream f(file); if(!f.is_open()){std::cerr<<C_RED<<"[Не удалось создать файл: "<<file<<"]"<<C_RESET<<std::endl;return;}
+    std::string out_buf;
     if (fmt == "json") {
         json arr = json::array();
         for (auto& m : G.messages) arr.push_back(m);
-        f << arr.dump(2, ' ', false, json::error_handler_t::replace);
+        out_buf = arr.dump(2, ' ', false, json::error_handler_t::replace);
     } else {
         for (auto& m : G.messages) {
             std::string role = m.value("role", std::string("unknown"));
@@ -2329,8 +2329,11 @@ static void export_dialog(const std::string& arg) {
             else if (m.count("content"))
                 cont = m["content"].dump();
             std::string txt = (fmt == "txt") ? strip_ansi(cont) : cont;
-            f << "## " << role << "\n" << txt << "\n\n";
+            out_buf += "## " + role + "\n" + txt + "\n\n";
         }
+    }
+    if (!atomic_write_file(file, out_buf)) {
+        std::cerr<<C_RED<<"[Не удалось создать файл: "<<file<<"]"<<C_RESET<<std::endl; return;
     }
     std::cout << C_GREEN << "[Экспортировано в " << file << "]" << C_RESET << std::endl;
 }
@@ -3395,15 +3398,10 @@ void cmd_update() {
         }
     }
 
-    // 3. Сохранить новый исходник
-    {
-        std::ofstream out(new_src);
-        if (!out.is_open()) {
-            std::cerr << C_RED << "[update: не удалось сохранить " << new_src << "]" << C_RESET << std::endl;
-            return;
-        }
-        out << src_body;
-        out.close();
+    // 3. Сохранить новый исходник (атомарно — обрыв не побьёт .cpp)
+    if (!atomic_write_file(new_src, src_body)) {
+        std::cerr << C_RED << "[update: не удалось сохранить " << new_src << "]" << C_RESET << std::endl;
+        return;
     }
 
     // 4. Скомпилировать
@@ -3626,8 +3624,7 @@ static void save_models_cache(const std::vector<std::string>& models) {
             }
             j["pricing"] = pr;
         }
-        std::ofstream f(MODELS_CACHE_FILE);
-        if (f.is_open()) f << j.dump(2);
+        atomic_write_file(MODELS_CACHE_FILE, j.dump(2));
     } catch (...) {}
 }
 
@@ -4138,12 +4135,12 @@ void cmd_dump(const std::string& arg) {
         file = get_home_dir() + "/tmp/last_bash.txt";
     if (!file.empty() && file[0] == '~')
         file = get_home_dir() + file.substr(1);
-    std::ofstream f(file);
-    if (!f.is_open()) {
-        std::cerr << C_RED << "[Не удалось открыть " << file << "]" << C_RESET << std::endl;
+    std::string buf = "# command:\n" + g_last_bash_code +
+                      "\n\n# output:\n" + g_last_bash_result;
+    if (!atomic_write_file(file, buf)) {
+        std::cerr << C_RED << "[Не удалось записать " << file << "]" << C_RESET << std::endl;
         return;
     }
-    f << "# command:\n" << g_last_bash_code << "\n\n# output:\n" << g_last_bash_result;
     std::cout << C_GREEN << "[Дамп сохранён: " << file << " ("
               << g_last_bash_result.size() << " байт)]" << C_RESET << std::endl;
 }
@@ -4739,10 +4736,7 @@ int main(int argc, char *argv[]) {
 ;
         // Автосоздание редактируемого файла системного промпта (для правки).
         {
-            std::ofstream sp_out(SYSTEM_PROMPT_FILE);
-            if (sp_out.is_open()) {
-                sp_out << G.sys_prompt;
-                sp_out.close();
+            if (atomic_write_file(SYSTEM_PROMPT_FILE, G.sys_prompt)) {
                 if (!G.fire)
                     std::cout << C_GRAY << "[Создан системный промпт: " << SYSTEM_PROMPT_FILE
                               << " — можно редактировать]" << C_RESET << std::endl;
