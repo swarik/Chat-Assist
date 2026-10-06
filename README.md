@@ -45,6 +45,41 @@ sw_chat — это программа для общения с искусств�
 
 (или просто откройте новый терминал).
 
+### Готовые бинарники (без компиляции)
+
+Скачать сборку под свою платформу можно из
+[Releases](https://github.com/swarik/Chat-Assist/releases/latest) — компилятор
+не нужен:
+
+| Платформа              | Файл                     |
+|------------------------|--------------------------|
+| Linux x86_64           | `sw_chat-linux-x86_64`   |
+| Linux arm64            | `sw_chat-linux-aarch64`  |
+| macOS (Apple Silicon)  | `sw_chat-macos-arm64`    |
+| Android / Termux arm64 | `sw_chat-termux-aarch64` |
+
+Пример для Linux x86_64:
+
+    mkdir -p ~/.local/bin ~/tmp
+    curl -fL https://github.com/swarik/Chat-Assist/releases/latest/download/sw_chat-linux-x86_64 \
+         -o ~/tmp/sw_chat-linux-x86_64
+    chmod +x ~/tmp/sw_chat-linux-x86_64
+    mv ~/tmp/sw_chat-linux-x86_64 ~/.local/bin/sw_chat
+    sw_chat
+
+Ссылка `releases/latest/download/…` всегда ведёт на свежий релиз — обновиться
+можно той же командой. Рядом в релизе лежит `SHA256SUMS` — при желании
+сверьте хеш скачанного файла:
+
+    sha256sum ~/.local/bin/sw_chat
+
+Бинарнику нужны системные библиотеки `libreadline` и `libcurl` — обычно уже
+стоят. Если нет:
+
+    sudo apt-get install -y libreadline8 libcurl4     # Debian / Ubuntu
+    brew install readline curl                         # macOS
+    pkg install readline libcurl                       # Termux
+
 ### Ручной способ (Ubuntu / Debian)
 
 Если не хочется запускать скрипты из интернета:
@@ -343,4 +378,4 @@ sw_chat выполняет команды, которые предлагает �
 
 ## Лицензия
 
-MIT — см. файл `LICENSE`.
+GPL-3.0 — см. файл [`LICENSE`](LICENSE).
