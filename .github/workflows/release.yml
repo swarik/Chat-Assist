@@ -1,0 +1,100 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            name: linux-x86_64
+            pm: apt
+            deps: g++ libreadline-dev libcurl4-openssl-dev
+          - os: ubuntu-24.04-arm
+            name: linux-aarch64
+            pm: apt
+            deps: g++ libreadline-dev libcurl4-openssl-dev
+          - os: macos-13
+            name: macos-x86_64
+            pm: brew
+            deps: readline curl
+          - os: macos-14
+            name: macos-arm64
+            pm: brew
+            deps: readline curl
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -e
+          if [ "${{ matrix.pm }}" = "apt" ]; then
+            sudo apt-get update
+            sudo apt-get install -y ${{ matrix.deps }}
+          else
+            brew install ${{ matrix.deps }}
+          fi
+
+      - name: Fetch nlohmann/json
+        run: |
+          mkdir -p "$HOME/.local/include/nlohmann"
+          curl -fsSL "https://github.com/nlohmann/json/releases/download/v3.11.3/json.hpp" \
+               -o "$HOME/.local/include/nlohmann/json.hpp"
+
+      - name: Build
+        shell: bash
+        run: |
+          set -e
+          EXTRA_I=""; EXTRA_L=""
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            RL="$(brew --prefix readline)"
+            CU="$(brew --prefix curl)"
+            EXTRA_I="-I$RL/include -I$CU/include"
+            EXTRA_L="-L$RL/lib -L$CU/lib"
+          fi
+          mkdir -p dist
+          g++ -std=c++17 -O2 -I"$HOME/.local/include" $EXTRA_I \
+              -o "dist/sw_chat-${{ matrix.name }}" sw_chat.cpp \
+              $EXTRA_L -lreadline -lcurl -lpthread
+          strip "dist/sw_chat-${{ matrix.name }}" || true
+          ls -la dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sw_chat-${{ matrix.name }}
+          path: dist/sw_chat-${{ matrix.name }}
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Checksums
+        run: |
+          cd artifacts
+          ls -la
+          sha256sum sw_chat-* > SHA256SUMS
+          cat SHA256SUMS
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/sw_chat-*
+            artifacts/SHA256SUMS
+          generate_release_notes: true

@@ -36,7 +36,7 @@
 
 using json = nlohmann::json;
 // ─────────────────────────── Версия ───────────────────────────
-#define APP_VERSION "1.4.21"
+#define APP_VERSION "1.4.22"
 
 
 // Emoji_Presentation: всегда отображается как emoji (ширина 2)
@@ -2761,7 +2761,7 @@ std::string do_api_request(bool &aborted) {
             // 200, но не-JSON: HTML-капча, plain-текст прокси и т.п.
             std::string head = state.full_content.substr(0, 200);
             // Заменяем управляющие символы, чтобы не сломать рендер.
-            for (char& ch : head) if ((unsigned char)ch < 0x20 && ch != '\n' && ch != '\t') ch = '?';
+            for (char& ch : head) if (static_cast<unsigned char>(ch) < 0x20 && ch != '\n' && ch != '\t') ch = '?';
             std::string msg = "[Ответ API не является JSON (HTTP " +
                               std::to_string(http_code) + "): " + head + "]";
             if (!is_compact())

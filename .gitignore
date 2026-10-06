@@ -3,3 +3,10 @@
 !.gitignore
 !sw_chat.cpp
 
+
+# явные исключения (нужны при клонировании)
+!.github
+!.github/**
+!install.sh
+!README.md
+!LICENSE
