@@ -1,0 +1,73 @@
+name: Lint
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cppcheck:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cppcheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cppcheck
+
+      - name: Fetch nlohmann/json
+        run: |
+          mkdir -p "$HOME/.local/include/nlohmann"
+          curl -fsSL "https://github.com/nlohmann/json/releases/download/v3.11.3/json.hpp" \
+               -o "$HOME/.local/include/nlohmann/json.hpp"
+
+      - name: cppcheck (informational, not blocking)
+        continue-on-error: true
+        run: |
+          cppcheck \
+            --enable=warning,performance,portability \
+            --inconclusive \
+            --error-exitcode=1 \
+            --inline-suppr \
+            --suppress=missingIncludeSystem \
+            --suppress=unmatchedSuppression \
+            -I "$HOME/.local/include" \
+            -I /usr/include \
+            --std=c++17 \
+            sw_chat.cpp
+
+  build-smoke:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++ libreadline-dev libcurl4-openssl-dev
+
+      - name: Fetch nlohmann/json
+        run: |
+          mkdir -p "$HOME/.local/include/nlohmann"
+          curl -fsSL "https://github.com/nlohmann/json/releases/download/v3.11.3/json.hpp" \
+               -o "$HOME/.local/include/nlohmann/json.hpp"
+
+      - name: Build with -Wall -Wextra (warnings = errors)
+        run: |
+          g++ -std=c++17 -O2 \
+            -Wall -Wextra -Wpedantic -Wshadow \
+            -Werror=implicit-fallthrough \
+            -I "$HOME/.local/include" \
+            -o /tmp/sw_chat sw_chat.cpp \
+            -lreadline -lcurl -lpthread
+
+      - name: Smoke test (--version, --help)
+        run: |
+          /tmp/sw_chat --version
+          /tmp/sw_chat --help | head -5
