@@ -227,6 +227,7 @@ static std::string READLINE_HIST_FILE;
 static std::string CONFIG_DIR;
 static std::string CONFIG_FILE;
 static std::string SESSIONS_DIR;
+static std::string INFLIGHT_FILE;   // журнал незавершённого запроса
 
 // ─────────────────────────── Глобальное состояние ────────────
 struct ChatSession {
@@ -1951,6 +1952,83 @@ static bool atomic_write_file(const std::string& path, const std::string& data) 
     return true;
 }
 
+// ── Журнал транзакции (inflight) ─────────────────────────────
+// Лёгкий маркер незавершённого обмена: sent (запрос ушёл) / received
+// (ответ получен в память). Позволяет после обрыва отличить «ответ
+// потерян» от «запрос не ушёл», а не молча дублировать отправку.
+// Никаких полных снимков контекста — только текст запроса.
+static void inflight_write(const std::string& state, const std::string& text) {
+    try {
+        json j;
+        j["state"]   = state;
+        j["time"]    = static_cast<long>(time(nullptr));
+        j["session"] = G.session_name;
+        j["text"]    = text;
+        std::string blob = j.dump(2, ' ', false, json::error_handler_t::replace);
+        atomic_write_file(INFLIGHT_FILE, blob);
+    } catch (...) {}
+}
+static void inflight_clear() {
+    if (!INFLIGHT_FILE.empty()) std::remove(INFLIGHT_FILE.c_str());
+}
+static bool inflight_load(json& out);   // определена ниже
+// При старте: если остался незакрытый журнал — сказать честно, что было.
+static void announce_inflight() {
+    json j;
+    if (!inflight_load(j)) return;
+    std::string state = j.value("state", std::string("?"));
+    std::string text  = j.value("text",  std::string());
+    long t = j.value("time", 0L);
+    std::string when;
+    if (t > 0) {
+        time_t tt = static_cast<time_t>(t);
+        struct tm tmv; localtime_r(&tt, &tmv);
+        char buf[32];
+        std::strftime(buf, sizeof(buf), "%d.%m %H:%M", &tmv);
+        when = buf;
+    }
+    std::string first = text.substr(0, 120);
+    for (char& ch : first) if (ch == '\n') ch = ' ';
+    std::cout << C_YELLOW
+              << "[!] Незавершённый запрос (" << when << ", состояние: " << state << ")."
+              << C_RESET << "\n";
+    if (!first.empty())
+        std::cout << C_GRAY << "    Текст: " << first
+                  << (text.size() > 120 ? "..." : "") << C_RESET << "\n";
+    if (state == "sent")
+        std::cout << C_YELLOW
+                  << "    Ответ не зафиксирован — связь оборвалась или процесс снят. /retry повторит (учти возможный дубль)."
+                  << C_RESET << "\n";
+    else
+        std::cout << C_YELLOW
+                  << "    Ответ был получен, но история не записана — проверь /history."
+                  << C_RESET << "\n";
+    std::cout << C_GRAY << "    Журнал: " << INFLIGHT_FILE
+              << "  (/context покажет, /retry повторит; закрывается сам)" << C_RESET << std::endl;
+}
+
+static void inflight_mark(const std::string& state) {
+    json j;
+    if (inflight_load(j)) {
+        j["state"] = state;
+        j["time"]  = static_cast<long>(time(nullptr));
+        atomic_write_file(INFLIGHT_FILE, j.dump(2, ' ', false, json::error_handler_t::replace));
+    }
+}
+static bool inflight_load(json& out) {
+    if (INFLIGHT_FILE.empty()) return false;
+    std::ifstream f(INFLIGHT_FILE);
+    if (!f.is_open()) return false;
+    try {
+        std::string content((std::istreambuf_iterator<char>(f)),
+                            std::istreambuf_iterator<char>());
+        if (content.empty()) return false;
+        out = json::parse(content);
+        return out.is_object();
+    } catch (...) { return false; }
+}
+
+
 static void ensure_dir(const std::string& path) {
     if (path.empty()) return;
     struct stat st;
@@ -1970,6 +2048,7 @@ static void init_paths() {
     CONFIG_FILE    = CONFIG_DIR + "/config.json";
     SESSIONS_DIR   = CONFIG_DIR + "/sessions";
     HISTORY_FILE   = SESSIONS_DIR + "/" + G.session_name + ".json";
+    INFLIGHT_FILE  = CONFIG_DIR + "/inflight.json";
     READLINE_HIST_FILE = CONFIG_DIR + "/.readline_history";
     MODELS_CACHE_FILE = CONFIG_DIR + "/models.json";
     ensure_dir(CONFIG_DIR); ensure_dir(SESSIONS_DIR);
@@ -2702,6 +2781,19 @@ std::string do_api_request(bool &aborted) {
 
     StreamState state = {"", false, -1};
     long http_code = 0; CURLcode res = CURLE_OK;
+    // Журнал транзакции: запрос уходит — ставим "sent" (текст последнего user,
+    // без снимка контекста). Обрыв после этой точки отличим от "не отправлено".
+    {
+        std::string last_user;
+        for (size_t i = G.messages.size(); i-- > 0; ) {
+            if (G.messages[i].value("role", std::string()) == "user") {
+                last_user = G.messages[i].value("content", std::string());
+                break;
+            }
+        }
+        if (last_user.size() > 4000) last_user.resize(4000);
+        inflight_write("sent", last_user);
+    }
     bool ok = do_attempt(G.model, state.full_content, http_code, res);
 
     std::string used_model = G.model;
@@ -2732,7 +2824,12 @@ std::string do_api_request(bool &aborted) {
 
     bool was_aborted = false;
     { std::lock_guard<std::mutex> lock(g_stream_mutex); if (g_stream_abort) { was_aborted = true; g_stream_abort = 0; } }
-    if (was_aborted) { aborted = true; if (!is_compact()) std::cout << "\n" << C_YELLOW << "[Запрос прерван]" << C_RESET << std::endl; return ""; }
+    if (was_aborted) {
+        aborted = true;
+        inflight_clear();   // прервано пользователем — не потеря, журнал закрываем
+        if (!is_compact()) std::cout << "\n" << C_YELLOW << "[Запрос прерван]" << C_RESET << std::endl;
+        return "";
+    }
     if (res != CURLE_OK) { std::cerr << C_RED << "curl: " << curl_easy_strerror(res) << C_RESET << std::endl; return ""; }
     if (http_code != 200) { std::cerr << C_RED << "[HTTP " << http_code << "] " << state.full_content.substr(0, 300) << C_RESET << std::endl; return ""; }
 
@@ -2776,6 +2873,7 @@ std::string do_api_request(bool &aborted) {
         if (!json_ok) return "";
     }
     
+    inflight_mark("received");
     return sanitize_utf8(state.full_content);
 }
 
@@ -3003,6 +3101,7 @@ void process_response(const std::string &content, bool aborted, size_t msgs_befo
 
     // Автосохранение: пишем всегда, уведомляем раз в 24 сообщения
     if (G.history_enabled && G.messages.size() > 2) save_history(G.messages.size() % HISTORY_NOTIFY_EVERY != 0);
+    inflight_clear();  // транзакция закрыта: ответ в памяти и история записана
 }
 
 // ─────────────────────────── Команды ──────────────────────────
@@ -4762,6 +4861,8 @@ int main(int argc, char *argv[]) {
     if (G.history_enabled) read_history(READLINE_HIST_FILE.c_str());
     if (G.history_enabled) history_truncate_file(READLINE_HIST_FILE.c_str(), 2000);
     rl_attempted_completion_function = cmd_completion;
+
+    announce_inflight();   // обычный старт: сообщить о незавершённом запросе
 
     while (true) {
         if (g_exit_requested) do_exit();
