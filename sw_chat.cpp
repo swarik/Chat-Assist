@@ -5109,6 +5109,11 @@ int main(int argc, char *argv[]) {
                 << (G.view_sc ? "on" : "off") << "]" << C_RESET << std::endl; }
             continue;
         } else if (userAnswer == "/clear") {
+            // /clear перечитывает системный промпт с диска (при старте он грузится
+            // один раз) — правки system_prompt.txt вступают в силу без перезапуска.
+            std::string _sp = load_system_prompt();
+            bool _sp_ok = !_sp.empty();
+            if (_sp_ok) G.sys_prompt = _sp;
             G.messages.clear();
             G.messages.push_back({{"role", "system"}, {"content", G.sys_prompt}});
             G.total_prompt_tokens     = 0;
@@ -5118,7 +5123,12 @@ int main(int argc, char *argv[]) {
             std::cout << C_BOLD << C_CYAN << "=== Chat CLI ===" << C_RESET << std::endl;
 
     std::cout << C_YELLOW << "Модель: " << G.model << C_RESET << std::endl;
-            std::cout << C_YELLOW << "[История очищена, экран очищен]" << C_RESET << std::endl;
+            if (_sp_ok)
+                std::cout << C_GREEN << "[История очищена; промпт перечитан: "
+                          << G.sys_prompt.size() << " байт]" << C_RESET << std::endl;
+            else
+                std::cout << C_YELLOW << "[История очищена; промпт оставлен прежний: "
+                          << G.sys_prompt.size() << " байт (файл не прочитан)]" << C_RESET << std::endl;
             continue;
         } else if (match_command(userAnswer, "/delete")) {
             cmd_delete(command_arg(userAnswer, "/delete"));
