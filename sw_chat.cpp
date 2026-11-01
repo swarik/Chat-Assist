@@ -2287,7 +2287,7 @@ static char** cmd_completion(const char* text, int start, int end) {
     rl_attempted_completion_over = 1;
     std::vector<std::string> matches;
     std::string t(text);
-    static const std::vector<std::string> cmds = {"/help","/save","/load","/clear","/history","/delete","/retry","/tokens","/model","/models","/apibase","/temp","/maxtokens","/system","/file","/autorun","/nores","/compact","/cost","/balance","/update","/about","/exit","/new","/list","/switch","/rename","/undo","/alias","/search","/export","/info","/dump","/voice","/speak","/listen","/FIRE","/time","/cls","/view_sc"};
+    static const std::vector<std::string> cmds = {"/help","/save","/load","/clear","/history","/delete","/retry","/tokens","/context","/model","/models","/apibase","/temp","/maxtokens","/system","/file","/autorun","/nores","/compact","/cost","/balance","/update","/about","/exit","/new","/list","/switch","/rename","/undo","/alias","/search","/export","/info","/dump","/voice","/speak","/listen","/FIRE","/time","/cls","/view_sc"};
     
     try {
         if (start == 0) {
@@ -3833,6 +3833,7 @@ void print_help(bool full = false) {
         << "  /delete N          — удалить сообщение N из истории\n"
         << "  /retry             — повторить последний запрос (в т.ч. если модель не ответила)\n"
         << "  /tokens            — показать использование токенов\n"
+        << "  /context           — фактический контекст: промпт память/диск, размеры, хеши\n"
         << "  /model [name|N]    — N из последнего /models; имя/фильтр; без args — меню\n"
         << "  /models [слова…] [pN|page N] [refresh|cache] — AND-фильтр; затем /model N\n"
         << "  /apibase [url]     — показать/задать API base (default 302.ai)\n"
@@ -3975,6 +3976,87 @@ void print_tokens() {
               << ", итого: "          << (G.total_prompt_tokens + G.total_completion_tokens)
               << "]" << C_RESET << std::endl;
 }
+
+// ── /context : фактический контекст, который уйдёт модели ──────
+// Показывает не предполагаемое, а реальное состояние: что в G.messages,
+// совпадает ли промпт в памяти с файлом на диске, сколько байт/токенов.
+static std::string ctx_hash(const std::string& s) {
+    unsigned long h = 5381;
+    for (size_t i = 0; i < s.size(); ++i)
+        h = ((h << 5) + h) + static_cast<unsigned char>(s[i]);
+    char buf[16];
+    std::snprintf(buf, sizeof(buf), "%08lx", h & 0xffffffffUL);
+    return std::string(buf);
+}
+
+void print_context() {
+    std::cout << C_MAGENTA << "\n  Фактический контекст" << C_RESET << "\n";
+    std::cout << C_GRAY << "  ────────────────────────────────" << C_RESET << "\n";
+
+    // системный промпт: память vs диск
+    std::string sp_disk;
+    {
+        std::ifstream f(SYSTEM_PROMPT_FILE);
+        if (f.is_open()) sp_disk.assign((std::istreambuf_iterator<char>(f)),
+                                         std::istreambuf_iterator<char>());
+    }
+    std::cout << C_MAGENTA << "  Промпт в памяти: " << C_RESET
+              << G.sys_prompt.size() << " б, хеш " << ctx_hash(G.sys_prompt) << "\n";
+    std::cout << C_MAGENTA << "  Промпт на диске: " << C_RESET
+              << sp_disk.size() << " б, хеш " << ctx_hash(sp_disk);
+    if (sp_disk.empty())
+        std::cout << " " << C_RED << "(файл не прочитан)" << C_RESET;
+    else if (sp_disk != G.sys_prompt)
+        std::cout << " " << C_YELLOW << "(ОТЛИЧАЕТСЯ — /clear перечитает)" << C_RESET;
+    else
+        std::cout << " " << C_GREEN << "(совпадает)" << C_RESET;
+    std::cout << "\n";
+    std::cout << C_GRAY << "  Файл: " << SYSTEM_PROMPT_FILE << C_RESET << "\n";
+
+    // разбивка сообщений по ролям
+    size_t n_sys=0, n_user=0, n_asst=0, n_other=0;
+    size_t b_sys=0, b_user=0, b_asst=0, b_other=0;
+    for (size_t i = 0; i < G.messages.size(); ++i) {
+        std::string role = G.messages[i].value("role", std::string());
+        size_t b = 0;
+        if (G.messages[i].count("content") && G.messages[i]["content"].is_string())
+            b = G.messages[i]["content"].get<std::string>().size();
+        else if (G.messages[i].count("content"))
+            b = G.messages[i]["content"].dump().size();
+        if      (role=="system")    { ++n_sys;   b_sys   += b; }
+        else if (role=="user")      { ++n_user;  b_user  += b; }
+        else if (role=="assistant") { ++n_asst;  b_asst  += b; }
+        else                        { ++n_other; b_other += b; }
+    }
+    std::cout << C_MAGENTA << "  Сообщений: " << C_RESET << G.messages.size()
+              << "  (system " << n_sys << ", user " << n_user
+              << ", assistant " << n_asst;
+    if (n_other) std::cout << ", прочее " << n_other;
+    std::cout << ")\n";
+    std::cout << C_MAGENTA << "  Байт: " << C_RESET
+              << "system " << b_sys << ", user " << b_user << ", assistant " << b_asst;
+    if (n_other) std::cout << ", прочее " << b_other;
+    std::cout << "; всего " << (b_sys + b_user + b_asst + b_other) << "\n";
+
+    std::cout << C_MAGENTA << "  Лимит сообщений: " << C_RESET << MAX_MESSAGES;
+    if (static_cast<int>(G.messages.size()) >= MAX_MESSAGES)
+        std::cout << " " << C_YELLOW << "(на пределе — будет обрезка)" << C_RESET;
+    std::cout << "\n";
+
+    std::cout << C_MAGENTA << "  Оценка токенов: " << C_RESET << "~"
+              << approx_tokens_messages() << "  (chars/4+6/msg)\n";
+
+    std::cout << C_MAGENTA << "  При отправке: " << C_RESET;
+    if (G.time_prefix) std::cout << "префикс даты-времени МСК; ";
+    std::cout << "model " << G.model << ", temp " << G.temperature
+              << ", max_tokens " << G.max_tokens << "\n";
+
+    std::cout << C_MAGENTA << "  API: " << C_RESET
+              << normalize_api_base(G.api_base) << "\n";
+    std::cout << C_GRAY << "  (содержимое не дублируется; для текста: /history, /system)"
+              << C_RESET << "\n";
+}
+
 
 void cmd_delete(const std::string &arg) {
     if (arg.empty()) {
@@ -4745,6 +4827,7 @@ int main(int argc, char *argv[]) {
             continue;
         }
         if (userAnswer == "/tokens")  { print_tokens();  continue; }
+        if (userAnswer == "/context") { print_context(); continue; }
         if (match_command(userAnswer, "/cost")) {
             std::string ca = command_arg(userAnswer, "/cost");
             print_cost(ca == "live" || ca == "refresh" || ca == "api");
