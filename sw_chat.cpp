@@ -277,6 +277,7 @@ struct ChatSession {
     std::string       session_name             = "default";
     std::string       api_base                 = DEFAULT_API_BASE;
     bool              view_sc                  = false; // /view_sc on: полный текст self-check; off: только [SC]
+    bool              think                    = false; // /think on: показывать блоки think; off: скрывать
     std::unordered_map<std::string, std::string> aliases;
 };
 
@@ -2068,6 +2069,7 @@ static void save_config() {
         j["fire_level"]=G.fire_level;
         j["time_prefix"]=G.time_prefix;
         j["view_sc"]=G.view_sc;
+        j["think"]=G.think;
         j["voice_in"]=G.voice_in; j["voice_out"]=G.voice_out;
         j["voice_lang"]=G.voice_lang; j["voice_region"]=G.voice_region;
         j["voice_variant"]=G.voice_variant; j["voice_engine"]=G.voice_engine;
@@ -2104,6 +2106,7 @@ static void load_config() {
         }
         if(j.count("time_prefix")) G.time_prefix=j["time_prefix"];
         if(j.count("view_sc")) G.view_sc=j["view_sc"];
+        if(j.count("think")) G.think=j["think"];
         if(j.count("voice_in")) G.voice_in=j["voice_in"];
         if(j.count("voice_out")) G.voice_out=j["voice_out"];
         if(j.count("voice_lang")    && j["voice_lang"].is_string())    G.voice_lang=j["voice_lang"];
@@ -2366,7 +2369,7 @@ static char** cmd_completion(const char* text, int start, int end) {
     rl_attempted_completion_over = 1;
     std::vector<std::string> matches;
     std::string t(text);
-    static const std::vector<std::string> cmds = {"/help","/save","/load","/clear","/history","/delete","/retry","/tokens","/context","/model","/models","/apibase","/temp","/maxtokens","/system","/file","/autorun","/nores","/compact","/cost","/balance","/update","/about","/exit","/new","/list","/switch","/rename","/undo","/alias","/search","/export","/info","/dump","/voice","/speak","/listen","/FIRE","/time","/cls","/view_sc"};
+    static const std::vector<std::string> cmds = {"/help","/save","/load","/clear","/history","/delete","/retry","/tokens","/context","/model","/models","/apibase","/temp","/maxtokens","/system","/file","/autorun","/nores","/compact","/cost","/balance","/update","/about","/exit","/new","/list","/switch","/rename","/undo","/alias","/search","/export","/info","/dump","/voice","/speak","/listen","/FIRE","/time","/cls","/view_sc","/think"};
     
     try {
         if (start == 0) {
@@ -2880,8 +2883,55 @@ std::string do_api_request(bool &aborted) {
 // ─────────────────────────── Обработка ответа ────────────────
 // Выводит ответ красиво, обрабатывает bash-команды
 // aborted — если ответ был прерван, не добавляем его в историю
-void process_response(const std::string &content, bool aborted, size_t msgs_before = 0) {
-    if (content.empty()) return;
+// ── Внутренний монолог (think) ───────────────────────────────
+// Блоки think — дренаж рассуждения: не попадают в контекст,
+// хранятся в ~/tmp/think_log.md. Показ переключается /think on|off.
+static void log_think(const std::string& text) {
+    if (text.empty()) return;
+    const char* h = getenv("HOME");
+    std::string path = std::string(h ? h : "/home/sw") + "/tmp/think_log.md";
+    try {
+        std::ofstream f(path, std::ios::app);
+        if (!f.is_open()) return;
+        time_t tt = time(nullptr); struct tm tmv; localtime_r(&tt, &tmv);
+        char buf[32]; std::strftime(buf, sizeof(buf), "%d.%m %H:%M:%S", &tmv);
+        f << "[" << buf << "]\n" << text << "\n---\n"; f.close();
+        ::chmod(path.c_str(), 0600);
+    } catch (...) {}
+}
+static void strip_think(std::string& text, bool show) {
+    std::string out; out.reserve(text.size());
+    size_t pos = 0;
+    while (pos < text.size()) {
+        size_t ts = text.find("```think", pos);
+        if (ts == std::string::npos) { out.append(text, pos, std::string::npos); break; }
+        if (ts > pos) out.append(text, pos, ts - pos);   // текст ПЕРЕД блоком
+        size_t after = ts + 8;
+        size_t nl = after;
+        while (nl < text.size() && (text[nl] == ' ' || text[nl] == '\t')) ++nl;
+        if (!(nl < text.size() && (text[nl] == '\n' || text[nl] == '\r'))) {
+            out.append(text, pos, after - pos); pos = after; continue;
+        }
+        size_t cs = nl;
+        if (cs < text.size() && text[cs] == '\r') ++cs;
+        if (cs < text.size() && text[cs] == '\n') ++cs;
+        size_t ce = text.find("```", cs);
+        if (ce == std::string::npos) { out.append(text, pos, std::string::npos); break; }
+        std::string inner = text.substr(cs, ce - cs);
+        log_think(inner);
+        if (show) { out += C_GRAY "[think]\n"; out += inner; out += C_RESET "\n"; }
+        pos = ce + 3;
+        if (pos < text.size() && text[pos] == '\n') ++pos;
+    }
+    text = out;
+}
+
+void process_response(const std::string &content_in, bool aborted, size_t msgs_before = 0) {
+    if (content_in.empty()) return;
+    std::string _think_body = content_in;
+    strip_think(_think_body, G.think);
+    const std::string& content = _think_body;
+    if (content.empty()) { inflight_clear(); return; }   // был только think — транзакция закрыта
 
     if (aborted) {
         print_assistant_text(content);
@@ -3052,6 +3102,7 @@ void process_response(const std::string &content, bool aborted, size_t msgs_befo
 
         bool chain_aborted = false;
         std::string next = do_api_request(chain_aborted);
+        strip_think(next, G.think);
         if (next.empty()) {
             // API не ответил — оставляем результат bash в контексте,
             // чтобы модель увидела его при следующем запросе (не теряем вывод).
@@ -3910,7 +3961,7 @@ void print_help(bool full = false) {
             << "  /model /models     — модель; /models claude sonnet | /model N|имя\n"
             << "  /apibase [url]     — API base (E3)\n"
             << "  /temp /maxtokens   — параметры генерации\n"
-            << "  /file /save /load /history /clear /cls /view_sc /delete /retry\n"
+            << "  /file /save /load /history /clear /cls /view_sc /think /delete /retry\n"
             << "  /voice /speak /listen — голос (Termux API: STT+TTS)\n"
             << "  /autorun /nores /compact /dryrun /tokens /cost /balance\n"
             << "  /new /list /switch /rename /undo /alias /search /export\n"
@@ -3928,6 +3979,7 @@ void print_help(bool full = false) {
         << "  /clear             — очистить историю диалога\n"
         << "  /cls               — только очистка экрана (чат продолжает работу)\n"
         << "  /view_sc on|off    — on: полный текст self-check; off: только [SC] (без арг. — статус)\n"
+        << "  /think on|off      — on: показывать внутренний монолог; off: скрывать (без арг. — статус)\n"
         << "  /history [on|off]  — показать историю / вкл-выкл сохранение\n"
         << "  /delete N          — удалить сообщение N из истории\n"
         << "  /retry             — повторить последний запрос (в т.ч. если модель не ответила)\n"
@@ -5291,6 +5343,14 @@ int main(int argc, char *argv[]) {
                 std::cout << C_GREEN << "[view_sc: off — только [SC]]" << C_RESET << std::endl; }
             else                  { std::cout << C_YELLOW << "[view_sc: "
                 << (G.view_sc ? "on" : "off") << "]" << C_RESET << std::endl; }
+        } else if (match_command(userAnswer, "/think")) {
+            std::string ta = command_arg(userAnswer, "/think");
+            if (ta == "on")       { G.think = true;  save_config();
+                std::cout << C_GREEN << "[think: on — монолог виден]" << C_RESET << std::endl; }
+            else if (ta == "off") { G.think = false; save_config();
+                std::cout << C_GREEN << "[think: off — монолог скрыт]" << C_RESET << std::endl; }
+            else                  { std::cout << C_YELLOW << "[think: "
+                << (G.think ? "on" : "off") << "]" << C_RESET << std::endl; }
             continue;
         } else if (userAnswer == "/clear") {
             // /clear перечитывает системный промпт с диска (при старте он грузится
