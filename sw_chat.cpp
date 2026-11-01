@@ -19,7 +19,6 @@
 #include <vector>
 #include <signal.h>
 #include <sys/wait.h>
-#include <termios.h>
 #include <sstream>
 #include <atomic>
 #include <thread>
@@ -37,7 +36,7 @@
 
 using json = nlohmann::json;
 // ─────────────────────────── Версия ───────────────────────────
-#define APP_VERSION "1.4.24"
+#define APP_VERSION "1.4.77"
 
 
 // Emoji_Presentation: всегда отображается как emoji (ширина 2)
@@ -275,8 +274,8 @@ struct ChatSession {
     double            voice_rate              = 1.0;    // -r
     bool              voice_short             = false;  // озвучивать только первый абзац
     std::string       session_name             = "default";
-    bool              auto_name                = true;
     std::string       api_base                 = DEFAULT_API_BASE;
+    bool              view_sc                  = false; // /view_sc on: полный текст self-check; off: только [SC]
     std::unordered_map<std::string, std::string> aliases;
 };
 
@@ -887,41 +886,6 @@ static void render_markdown(const std::string &text) {
             }
         }
 
-        // Чек-бокс: "- [ ] text" / "- [x] text" (можно с отступом или + / *)
-        {
-            size_t csp = 0;
-            while (csp < line.size() && line[csp] == ' ') ++csp;
-            if (csp + 5 < line.size()
-                && (line[csp] == '-' || line[csp] == '*' || line[csp] == '+')
-                && line[csp + 1] == ' ' && line[csp + 2] == '['
-                && (line[csp + 3] == ' ' || line[csp + 3] == 'x' || line[csp + 3] == 'X')
-                && line[csp + 4] == ']'
-                && (line[csp + 5] == ' ' || line[csp + 5] == '\0')) {
-                bool done = (line[csp + 3] == 'x' || line[csp + 3] == 'X');
-                std::string body = (csp + 6 <= line.size()) ? line.substr(csp + 6) : std::string();
-                std::string ind((csp >= 2) ? (csp / 2) : 0, ' ');
-                const char* mark = done ? "\xe2\x98\x91 " : "\xe2\x98\x90 ";
-                const char* mcol = done ? C_GREEN : C_GRAY;
-                std::string prefix = "  " + ind + mark;
-                size_t prefix_w = 2 + ind.size() + 2;
-                if (is_compact()) {
-                    std::cout << mcol << prefix << C_RESET << render_inline_md(body) << "\n";
-                } else {
-                    int tw = get_terminal_width();
-                    size_t wrap_w = (tw > static_cast<int>(prefix_w) + 8)
-                                  ? static_cast<size_t>(tw - prefix_w) : 40;
-                    auto wrapped = wrap_plain(body, wrap_w);
-                    if (wrapped.empty()) wrapped.push_back("");
-                    for (size_t k = 0; k < wrapped.size(); ++k) {
-                        if (k == 0) std::cout << mcol << prefix << C_RESET;
-                        else        std::cout << std::string(prefix_w, ' ');
-                        std::cout << render_inline_md(wrapped[k]) << "\n";
-                    }
-                }
-                continue;
-            }
-        }
-
         // Маркированный список (- или *)
         if (line.size()>=2 && (line[0]=='-'||line[0]=='*') && line[1]==' ') {
             {
@@ -1190,19 +1154,8 @@ static void note_yellow(const std::string& s) {
 // Единая обёртка над readline для y/n[/a]-вопросов.
 // Возврат: 0 = NO (в т.ч. Ctrl+C/EOF/пустой ввод — безопасный дефолт),
 //          1 = YES, 2 = ALL (только при allow_all=true, для "a/в").
-// Особенность readline: он читает строку только до первого '\n'.
-// Если пользователь нажал Enter несколько раз, «лишние» '\n' остаются
-// в буфере терминала и при следующем вопросе могут быть приняты за
-// готовые ответы (например, автоматически пропустить следующий
-// bash-блок). Поэтому сразу после чтения строки очищаем очередь ввода.
-static void flush_pending_stdin() {
-    if (!isatty(STDIN_FILENO)) return;
-    (void)tcflush(STDIN_FILENO, TCIFLUSH);
-}
-
 static int ask_yes_no(const char* prompt, bool allow_all = false) {
     std::cout.flush(); fflush(stdout);
-    flush_pending_stdin();
     char* rl = readline(prompt);
     if (!rl) return 0;
     std::string ans(rl); free(rl);
@@ -1989,10 +1942,12 @@ static bool atomic_write_file(const std::string& path, const std::string& data) 
         f.flush();
         if (!f.good()) { f.close(); std::remove(tmp.c_str()); return false; }
     }
+    chmod(tmp.c_str(), 0600);   // приватность: история/конфиг не читаемы группой и остальными
     if (std::rename(tmp.c_str(), path.c_str()) != 0) {
         std::remove(tmp.c_str());
         return false;
     }
+    chmod(path.c_str(), 0600);  // и после атомарной замены держим 0600
     return true;
 }
 
@@ -2033,6 +1988,7 @@ static void save_config() {
         j["fire"]=G.fire;
         j["fire_level"]=G.fire_level;
         j["time_prefix"]=G.time_prefix;
+        j["view_sc"]=G.view_sc;
         j["voice_in"]=G.voice_in; j["voice_out"]=G.voice_out;
         j["voice_lang"]=G.voice_lang; j["voice_region"]=G.voice_region;
         j["voice_variant"]=G.voice_variant; j["voice_engine"]=G.voice_engine;
@@ -2041,7 +1997,6 @@ static void save_config() {
         j["api_base"]=G.api_base;
         j["aliases"]=G.aliases;
         j["session_name"]=G.session_name;
-        j["auto_name"]=G.auto_name;
         atomic_write_file(CONFIG_FILE, j.dump(2));
     } catch (const std::exception& e) {
         std::cerr << C_YELLOW << "[config: не удалось сохранить: " << e.what()
@@ -2069,6 +2024,7 @@ static void load_config() {
             if (G.fire_level > 5) G.fire_level = 5;
         }
         if(j.count("time_prefix")) G.time_prefix=j["time_prefix"];
+        if(j.count("view_sc")) G.view_sc=j["view_sc"];
         if(j.count("voice_in")) G.voice_in=j["voice_in"];
         if(j.count("voice_out")) G.voice_out=j["voice_out"];
         if(j.count("voice_lang")    && j["voice_lang"].is_string())    G.voice_lang=j["voice_lang"];
@@ -2084,24 +2040,15 @@ static void load_config() {
         if(j.count("aliases")) G.aliases=j["aliases"].get<std::unordered_map<std::string,std::string>>();
         if(j.count("session_name") && j["session_name"].is_string())
             G.session_name = j["session_name"].get<std::string>();
-        if(j.count("auto_name") && j["auto_name"].is_boolean())
-            G.auto_name = j["auto_name"].get<bool>();
     } catch (const std::exception& e) {
         // Тихая потеря конфига — раньше пользователь не узнавал о поломке.
         std::cerr << C_YELLOW << "[config: не удалось прочитать " << CONFIG_FILE
                   << ": " << e.what() << " — используются дефолты]" << C_RESET << std::endl;
     }
 }
-// ─────── авто-имя сессии (задача 2) ───────
-static bool g_auto_name_done = false;
-static std::string sanitize_session_name(const std::string& raw);
-static std::string llm_quick_query(const std::string& user_prompt, int max_tok);
-static void maybe_autoname_session();
-
 static void switch_session(const std::string& name) {
     if (G.history_enabled) save_history(true);
     g_undo_stack.clear();   // undo не должен пересекать границу сессии
-    g_auto_name_done = false;
     G.session_name = name;
     HISTORY_FILE = SESSIONS_DIR + "/" + name + ".json";
     G.history_file = HISTORY_FILE;
@@ -2112,7 +2059,7 @@ static void switch_session(const std::string& name) {
     load_history();
     std::cout << C_GREEN << "[Сессия: " << name << "]" << C_RESET << std::endl;
 }
-static void rename_session(const std::string& new_name, bool silent = false) {
+static void rename_session(const std::string& new_name) {
     if (new_name.empty()) {
         std::cerr << C_RED << "[Использование: /rename <новое_имя>]" << C_RESET << std::endl;
         return;
@@ -2129,134 +2076,7 @@ static void rename_session(const std::string& new_name, bool silent = false) {
     G.session_name = new_name;
     HISTORY_FILE = new_path;
     G.history_file = new_path;
-    if (!silent && !G.fire)
-        std::cout << C_GREEN << "[Сессия переименована: " << new_name << "]" << C_RESET << std::endl;
-}
-
-// ─────── авто-имя сессии: вспомогательные (задача 2) ───────
-static std::string sanitize_session_name(const std::string& raw) {
-    std::string s = raw;
-    size_t nl = s.find_first_of("\r\n");
-    if (nl != std::string::npos) s = s.substr(0, nl);
-    while (!s.empty() && (s.front()==' '||s.front()=='\t')) s.erase(0,1);
-    while (!s.empty() && (s.back() ==' '||s.back() =='\t')) s.pop_back();
-    while (!s.empty() && (s.front()=='"'||s.front()=='\''||s.front()=='`')) s.erase(0,1);
-    while (!s.empty() && (s.back() =='"'||s.back() =='\''||s.back() =='`')) s.pop_back();
-    std::string out; out.reserve(s.size());
-    for (unsigned char ch : s) {
-        if ((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') ||
-            (ch >= '0' && ch <= '9') || ch == '-' || ch == '_') {
-            out.push_back(static_cast<char>(ch));
-        } else if (ch == ' ' || ch == '\t' || ch == '.') {
-            out.push_back('_');
-        } else if (ch >= 0x80) {
-            out.push_back(static_cast<char>(ch));   // UTF-8 как есть
-        }
-    }
-    while (!out.empty() && out.front()=='_') out.erase(0,1);
-    while (!out.empty() && out.back() =='_') out.pop_back();
-    if (out.size() > 40) {
-        out.resize(40);
-        // не рвём UTF-8: до последней полной последовательности
-        while (!out.empty() && (static_cast<unsigned char>(out.back()) & 0xC0) == 0x80)
-            out.pop_back();
-    }
-    if (out.empty() || out == "default") return std::string();
-    return out;
-}
-
-static std::string llm_quick_query(const std::string& user_prompt, int max_tok) {
-    std::string api_key = get_api_key();
-    if (api_key.empty()) return std::string();
-    CurlPtr curl_owner(curl_easy_init());
-    CURL* curl = curl_owner.get();
-    if (!curl) return std::string();
-
-    json jData = {
-        {"model", G.model},
-        {"messages", json::array({ json{{"role","user"},{"content",user_prompt}} })},
-        {"temperature", 0.3},
-        {"max_tokens", max_tok}
-    };
-    std::string body = jData.dump(-1, ' ', false, json::error_handler_t::replace);
-    std::string url  = normalize_api_base(G.api_base) + "/v1/chat/completions";
-
-    struct curl_slist* raw =
-        curl_slist_append(nullptr, "Content-Type: application/json");
-    std::string auth = "Authorization: Bearer " + api_key;
-    raw = curl_slist_append(raw, auth.c_str());
-    SlistPtr headers_owner(raw);
-
-    std::string resp;
-    auto write_cb = [](void* c, size_t sz, size_t nm, void* up) -> size_t {
-        static_cast<std::string*>(up)->append(static_cast<char*>(c), sz * nm);
-        return sz * nm;
-    };
-    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.c_str());
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, static_cast<long>(body.size()));
-    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers_owner.get());
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION,
-        static_cast<size_t(*)(void*,size_t,size_t,void*)>(write_cb));
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &resp);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
-    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 5L);
-    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
-    CURLcode r = curl_easy_perform(curl);
-    if (r != CURLE_OK) return std::string();
-    long hc = 0;
-    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &hc);
-    if (hc != 200) return std::string();
-    try {
-        json j = json::parse(resp);
-        if (!j.contains("choices") || !j["choices"].is_array() || j["choices"].empty())
-            return std::string();
-        return j["choices"][0]["message"].value("content", std::string());
-    } catch (...) {
-        return std::string();
-    }
-}
-
-static void maybe_autoname_session() {
-    if (!G.auto_name) return;
-    if (g_auto_name_done) return;
-    g_auto_name_done = true;   // одна попытка на сессию
-
-    if (G.session_name.rfind("session_", 0) != 0) return;
-    if (G.session_name.size() <= 8) return;
-    for (size_t i = 8; i < G.session_name.size(); ++i) {
-        if (G.session_name[i] < '0' || G.session_name[i] > '9') return;
-    }
-
-    std::string first_user;
-    int users = 0, assistants = 0;
-    for (auto& m : G.messages) {
-        std::string r = m.value("role", std::string());
-        if (r == "user") { ++users; if (first_user.empty()) first_user = m.value("content", std::string()); }
-        else if (r == "assistant") ++assistants;
-    }
-    if (users < 1 || assistants < 1 || first_user.empty()) return;
-    if (first_user.size() > 400) first_user.resize(400);
-
-    std::string prompt =
-        "Придумай очень короткое (2\u20134 слова, не более 32 символов) название сессии, "
-        "отражающее суть следующего сообщения пользователя. Только название. "
-        "Без кавычек, без точки в конце, без эмодзи, без пояснений. "
-        "Латиница, кириллица, цифры, дефисы и подчёркивания.\n\n"
-        "Сообщение:\n\"\"\"\n" + first_user + "\n\"\"\"\n";
-
-    std::string raw = llm_quick_query(prompt, 40);
-    if (raw.empty()) return;
-    std::string name = sanitize_session_name(raw);
-    if (name.empty() || name == G.session_name) return;
-
-    // в FIRE — молча
-    if (!G.fire) {
-        std::cout << C_YELLOW << "[Сессия переименована автоматически: "
-                  << name << "]" << C_RESET << std::endl;
-    }
-    rename_session(name, true);
-    save_config();
+    std::cout << C_GREEN << "[Сессия переименована: " << new_name << "]" << C_RESET << std::endl;
 }
 
 static void list_sessions() {
@@ -2315,11 +2135,11 @@ static void export_dialog(const std::string& arg) {
     else if(!arg.empty()){fmt=arg;}
     if(file.empty()) file = def_dir + "dialog_export." + fmt;
     else if(file[0]=='~') file = get_home_dir() + file.substr(1);
-    std::string out_buf;
+    std::ofstream f(file); if(!f.is_open()){std::cerr<<C_RED<<"[Не удалось создать файл: "<<file<<"]"<<C_RESET<<std::endl;return;}
     if (fmt == "json") {
         json arr = json::array();
         for (auto& m : G.messages) arr.push_back(m);
-        out_buf = arr.dump(2, ' ', false, json::error_handler_t::replace);
+        f << arr.dump(2, ' ', false, json::error_handler_t::replace);
     } else {
         for (auto& m : G.messages) {
             std::string role = m.value("role", std::string("unknown"));
@@ -2329,11 +2149,8 @@ static void export_dialog(const std::string& arg) {
             else if (m.count("content"))
                 cont = m["content"].dump();
             std::string txt = (fmt == "txt") ? strip_ansi(cont) : cont;
-            out_buf += "## " + role + "\n" + txt + "\n\n";
+            f << "## " << role << "\n" << txt << "\n\n";
         }
-    }
-    if (!atomic_write_file(file, out_buf)) {
-        std::cerr<<C_RED<<"[Не удалось создать файл: "<<file<<"]"<<C_RESET<<std::endl; return;
     }
     std::cout << C_GREEN << "[Экспортировано в " << file << "]" << C_RESET << std::endl;
 }
@@ -2470,7 +2287,7 @@ static char** cmd_completion(const char* text, int start, int end) {
     rl_attempted_completion_over = 1;
     std::vector<std::string> matches;
     std::string t(text);
-    static const std::vector<std::string> cmds = {"/help","/save","/load","/clear","/history","/delete","/retry","/tokens","/model","/models","/apibase","/temp","/maxtokens","/system","/file","/autorun","/nores","/compact","/cost","/balance","/update","/about","/exit","/new","/list","/switch","/rename","/autoname","/undo","/alias","/search","/export","/info","/dump","/voice","/speak","/listen","/FIRE","/time"};
+    static const std::vector<std::string> cmds = {"/help","/save","/load","/clear","/history","/delete","/retry","/tokens","/model","/models","/apibase","/temp","/maxtokens","/system","/file","/autorun","/nores","/compact","/cost","/balance","/update","/about","/exit","/new","/list","/switch","/rename","/undo","/alias","/search","/export","/info","/dump","/voice","/speak","/listen","/FIRE","/time","/cls","/view_sc"};
     
     try {
         if (start == 0) {
@@ -2949,7 +2766,7 @@ std::string do_api_request(bool &aborted) {
             // 200, но не-JSON: HTML-капча, plain-текст прокси и т.п.
             std::string head = state.full_content.substr(0, 200);
             // Заменяем управляющие символы, чтобы не сломать рендер.
-            for (char& ch : head) if (static_cast<unsigned char>(ch) < 0x20 && ch != '\n' && ch != '\t') ch = '?';
+            for (char& ch : head) if ((unsigned char)ch < 0x20 && ch != '\n' && ch != '\t') ch = '?';
             std::string msg = "[Ответ API не является JSON (HTTP " +
                               std::to_string(http_code) + "): " + head + "]";
             if (!is_compact())
@@ -3398,10 +3215,15 @@ void cmd_update() {
         }
     }
 
-    // 3. Сохранить новый исходник (атомарно — обрыв не побьёт .cpp)
-    if (!atomic_write_file(new_src, src_body)) {
-        std::cerr << C_RED << "[update: не удалось сохранить " << new_src << "]" << C_RESET << std::endl;
-        return;
+    // 3. Сохранить новый исходник
+    {
+        std::ofstream out(new_src);
+        if (!out.is_open()) {
+            std::cerr << C_RED << "[update: не удалось сохранить " << new_src << "]" << C_RESET << std::endl;
+            return;
+        }
+        out << src_body;
+        out.close();
     }
 
     // 4. Скомпилировать
@@ -3564,7 +3386,6 @@ static bool confirm_exit() {
         : C_YELLOW "[Выходите из программы? (y/n | д/н)]: " C_RESET;
 
     std::cout.flush(); fflush(stdout);
-    flush_pending_stdin();
     char *rl = readline(prompt);
     if (!rl) {
         // EOF (Ctrl+D) или сигнал — спросить нельзя, выходим без зацикливания.
@@ -3624,7 +3445,8 @@ static void save_models_cache(const std::vector<std::string>& models) {
             }
             j["pricing"] = pr;
         }
-        atomic_write_file(MODELS_CACHE_FILE, j.dump(2));
+        std::ofstream f(MODELS_CACHE_FILE);
+        if (f.is_open()) f << j.dump(2);
     } catch (...) {}
 }
 
@@ -3989,10 +3811,10 @@ void print_help(bool full = false) {
             << "  /model /models     — модель; /models claude sonnet | /model N|имя\n"
             << "  /apibase [url]     — API base (E3)\n"
             << "  /temp /maxtokens   — параметры генерации\n"
-            << "  /file /save /load /history /clear /delete /retry\n"
+            << "  /file /save /load /history /clear /cls /view_sc /delete /retry\n"
             << "  /voice /speak /listen — голос (Termux API: STT+TTS)\n"
             << "  /autorun /nores /compact /dryrun /tokens /cost /balance\n"
-            << "  /new /list /switch /rename /autoname /undo /alias /search /export\n"
+            << "  /new /list /switch /rename /undo /alias /search /export\n"
             << "  /info N /dump [file]\n"
             << "  /update /about /exit\n"
             << "\nВвод: Enter/ '//' отправить | '.' пустая строка | Ctrl+C прервать запрос\n"
@@ -4005,6 +3827,8 @@ void print_help(bool full = false) {
         << "  /save              — сохранить историю\n"
         << "  /load              — загрузить историю\n"
         << "  /clear             — очистить историю диалога\n"
+        << "  /cls               — только очистка экрана (чат продолжает работу)\n"
+        << "  /view_sc on|off    — on: полный текст self-check; off: только [SC] (без арг. — статус)\n"
         << "  /history [on|off]  — показать историю / вкл-выкл сохранение\n"
         << "  /delete N          — удалить сообщение N из истории\n"
         << "  /retry             — повторить последний запрос (в т.ч. если модель не ответила)\n"
@@ -4048,7 +3872,6 @@ void print_help(bool full = false) {
         << "  /list              — список сессий\n"
         << "  /switch <name>     — переключить сессию\n"
         << "  /rename <name>     — переименовать текущую сессию\n"
-        << "  /autoname [on/off] — авто-имя сессии по теме первого вопроса\n"
         << "  /undo              — откатить последний шаг (запрос)\n"
         << "  /alias k=v         — создать/удалить/показать алиасы\n"
         << "  /search <text>     — поиск по истории\n"
@@ -4135,12 +3958,12 @@ void cmd_dump(const std::string& arg) {
         file = get_home_dir() + "/tmp/last_bash.txt";
     if (!file.empty() && file[0] == '~')
         file = get_home_dir() + file.substr(1);
-    std::string buf = "# command:\n" + g_last_bash_code +
-                      "\n\n# output:\n" + g_last_bash_result;
-    if (!atomic_write_file(file, buf)) {
-        std::cerr << C_RED << "[Не удалось записать " << file << "]" << C_RESET << std::endl;
+    std::ofstream f(file);
+    if (!f.is_open()) {
+        std::cerr << C_RED << "[Не удалось открыть " << file << "]" << C_RESET << std::endl;
         return;
     }
+    f << "# command:\n" << g_last_bash_code << "\n\n# output:\n" << g_last_bash_result;
     std::cout << C_GREEN << "[Дамп сохранён: " << file << " ("
               << g_last_bash_result.size() << " байт)]" << C_RESET << std::endl;
 }
@@ -4385,6 +4208,7 @@ static int voice_prefill_hook() {
     if (!g_rl_prefill.empty()) rl_insert_text(g_rl_prefill.c_str());
     return 0;
 }
+
 
 static bool get_user_input(std::string &out) {
     std::string result;
@@ -4736,7 +4560,10 @@ int main(int argc, char *argv[]) {
 ;
         // Автосоздание редактируемого файла системного промпта (для правки).
         {
-            if (atomic_write_file(SYSTEM_PROMPT_FILE, G.sys_prompt)) {
+            std::ofstream sp_out(SYSTEM_PROMPT_FILE);
+            if (sp_out.is_open()) {
+                sp_out << G.sys_prompt;
+                sp_out.close();
                 if (!G.fire)
                     std::cout << C_GRAY << "[Создан системный промпт: " << SYSTEM_PROMPT_FILE
                               << " — можно редактировать]" << C_RESET << std::endl;
@@ -4868,6 +4695,18 @@ int main(int argc, char *argv[]) {
         userAnswer = expand_aliases(userAnswer);
         if (userAnswer.empty()) continue;
 
+        // Подстановка [SC]: self-check свёрнут в маркер, разворачиваем в полный текст.
+        if (userAnswer == "[SC]") {
+            std::ifstream scf(get_home_dir() + "/tmp/sc_prompt.txt");
+            std::string sctext;
+            if (scf.is_open())
+                sctext.assign((std::istreambuf_iterator<char>(scf)),
+                              std::istreambuf_iterator<char>());
+            while (!sctext.empty() && (sctext.back()=='\n' || sctext.back()=='\r'))
+                sctext.pop_back();
+            if (!sctext.empty()) userAnswer = sctext;
+        }
+
         // ── Специальные команды ──
         if (match_command(userAnswer, "/help")) {
             std::string ha = command_arg(userAnswer, "/help");
@@ -4902,21 +4741,6 @@ int main(int argc, char *argv[]) {
                 std::cout << C_YELLOW << "[История: ВЫКЛЮЧЕНА]" << C_RESET << std::endl;
             } else {
                 print_history();
-            }
-            continue;
-        }
-        if (match_command(userAnswer, "/autoname")) {
-            std::string a = command_arg(userAnswer, "/autoname");
-            while (!a.empty() && a[0]==' ') a.erase(0,1);
-            if (a == "on") {
-                G.auto_name = true; save_config();
-                std::cout << C_YELLOW << "[Авто-имя сессии: ВКЛЮЧЕНО]" << C_RESET << std::endl;
-            } else if (a == "off") {
-                G.auto_name = false; save_config();
-                std::cout << C_YELLOW << "[Авто-имя сессии: ВЫКЛЮЧЕНО]" << C_RESET << std::endl;
-            } else {
-                std::cout << C_GRAY << "[Авто-имя сессии: "
-                          << (G.auto_name ? "ВКЛ" : "ВЫКЛ") << "]" << C_RESET << std::endl;
             }
             continue;
         }
@@ -5271,6 +5095,19 @@ int main(int argc, char *argv[]) {
             }
             std::cout << C_YELLOW << "[Повтор запроса...]" << C_RESET << std::endl;
             // Fall through к API запросу ниже
+        } else if (userAnswer == "/cls") {
+            // Только очистка экрана. История и работа чата не трогаются.
+            std::cout << "\033[2J\033[H" << std::flush;
+            continue;
+        } else if (match_command(userAnswer, "/view_sc")) {
+            std::string va = command_arg(userAnswer, "/view_sc");
+            if (va == "on")       { G.view_sc = true;  save_config();
+                std::cout << C_GREEN << "[view_sc: on — полный текст self-check]" << C_RESET << std::endl; }
+            else if (va == "off") { G.view_sc = false; save_config();
+                std::cout << C_GREEN << "[view_sc: off — только [SC]]" << C_RESET << std::endl; }
+            else                  { std::cout << C_YELLOW << "[view_sc: "
+                << (G.view_sc ? "on" : "off") << "]" << C_RESET << std::endl; }
+            continue;
         } else if (userAnswer == "/clear") {
             G.messages.clear();
             G.messages.push_back({{"role", "system"}, {"content", G.sys_prompt}});
@@ -5388,7 +5225,6 @@ int main(int argc, char *argv[]) {
         if (g_exit_requested) do_exit();
 
         process_response(content, aborted, msgs_before);
-        maybe_autoname_session();
         if (G.voice_out && !aborted && !content.empty()) {
             std::string sp = strip_for_tts(content, G.voice_short);
             if (!sp.empty()) voice_speak(sp);
