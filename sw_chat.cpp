@@ -36,7 +36,7 @@
 
 using json = nlohmann::json;
 // ─────────────────────────── Версия ───────────────────────────
-#define APP_VERSION "1.4.78"
+#define APP_VERSION "1.4.79"
 
 
 // Emoji_Presentation: всегда отображается как emoji (ширина 2)
@@ -278,6 +278,7 @@ struct ChatSession {
     std::string       api_base                 = DEFAULT_API_BASE;
     bool              view_sc                  = false; // /view_sc on: полный текст self-check; off: только [SC]
     bool              think                    = false; // /think on: показывать блоки think; off: скрывать
+    std::string       reasoning_effort         = ""; // пусто=auto; low|medium|high|xhigh|max
     std::unordered_map<std::string, std::string> aliases;
 };
 
@@ -2070,6 +2071,7 @@ static void save_config() {
         j["time_prefix"]=G.time_prefix;
         j["view_sc"]=G.view_sc;
         j["think"]=G.think;
+        j["reasoning_effort"]=G.reasoning_effort;
         j["voice_in"]=G.voice_in; j["voice_out"]=G.voice_out;
         j["voice_lang"]=G.voice_lang; j["voice_region"]=G.voice_region;
         j["voice_variant"]=G.voice_variant; j["voice_engine"]=G.voice_engine;
@@ -2107,6 +2109,8 @@ static void load_config() {
         if(j.count("time_prefix")) G.time_prefix=j["time_prefix"];
         if(j.count("view_sc")) G.view_sc=j["view_sc"];
         if(j.count("think")) G.think=j["think"];
+        if(j.count("reasoning_effort") && j["reasoning_effort"].is_string())
+            G.reasoning_effort = j["reasoning_effort"].get<std::string>();
         if(j.count("voice_in")) G.voice_in=j["voice_in"];
         if(j.count("voice_out")) G.voice_out=j["voice_out"];
         if(j.count("voice_lang")    && j["voice_lang"].is_string())    G.voice_lang=j["voice_lang"];
@@ -2369,7 +2373,7 @@ static char** cmd_completion(const char* text, int start, int end) {
     rl_attempted_completion_over = 1;
     std::vector<std::string> matches;
     std::string t(text);
-    static const std::vector<std::string> cmds = {"/help","/save","/load","/clear","/history","/delete","/retry","/tokens","/context","/model","/models","/apibase","/temp","/maxtokens","/system","/file","/autorun","/nores","/compact","/cost","/balance","/update","/about","/exit","/new","/list","/switch","/rename","/undo","/alias","/search","/export","/info","/dump","/voice","/speak","/listen","/FIRE","/time","/cls","/view_sc","/think"};
+    static const std::vector<std::string> cmds = {"/help","/save","/load","/clear","/history","/delete","/retry","/tokens","/context","/model","/models","/apibase","/temp","/maxtokens","/reasoning","/system","/file","/autorun","/nores","/compact","/cost","/balance","/update","/about","/exit","/new","/list","/switch","/rename","/undo","/alias","/search","/export","/info","/dump","/voice","/speak","/listen","/FIRE","/time","/cls","/view_sc","/think"};
     
     try {
         if (start == 0) {
@@ -2607,6 +2611,206 @@ static std::string moscow_now_str() {
     return std::string(buf);
 }
 
+// Профиль OpenAI-совместимого маршрута 302.ai.
+// Поля у разных провайдеров не взаимозаменяемы: Claude и часть reasoning-моделей
+// отклоняют temperature, а разные маршруты имеют разные лимиты max_tokens.
+enum class ModelProtocol { OpenAI, Anthropic };
+
+struct ModelRouteProfile {
+    ModelProtocol protocol = ModelProtocol::OpenAI;
+    bool send_temperature = true;
+    bool supports_reasoning_effort = false;
+    bool supports_effort_max = false;
+    bool omit_max_tokens = false;
+    int max_output_tokens = 300000;
+};
+
+static ModelRouteProfile model_route_profile(const std::string& model) {
+    ModelRouteProfile p;
+    const std::string m = to_lower_copy(model);
+
+    // Anthropic-совместимые маршруты 302.ai.
+    if (m.find("claude-") != std::string::npos) {
+        p.protocol = ModelProtocol::Anthropic;
+        p.send_temperature = (m != "sale/claude-opus-5-5");
+        p.max_output_tokens = 65536;
+        return p;
+    }
+
+    // sale/kimi-k3.1-pro принимает только базовый payload: без temperature,
+    // max_tokens и reasoning_effort. Обычный kimi-k3.1-pro устроен иначе.
+    if (m == "sale/kimi-k3.1-pro") {
+        p.send_temperature = false;
+        p.omit_max_tokens = true;
+        return p;
+    }
+    if (m == "kimi-k3.1-pro") {
+        p.send_temperature = false;
+        p.max_output_tokens = 131072;
+        p.supports_reasoning_effort = true;
+        p.supports_effort_max = true;
+        return p;
+    }
+
+    // Kimi K3 и sale/kimi-k3 принимают все основные поля.
+    if (m.find("kimi-k3") != std::string::npos) {
+        p.supports_reasoning_effort = true;
+        p.supports_effort_max = true;
+        return p;
+    }
+
+    // Kimi K2 reasoning-маршруты не принимают temperature.
+    if (m.find("kimi-k2") != std::string::npos) {
+        p.send_temperature = false;
+        p.supports_reasoning_effort = true;
+        return p;
+    }
+
+    // Terra — исключение среди GPT-6: принимает temperature и большой output.
+    if (m == "gpt-6.1-terra") {
+        p.supports_reasoning_effort = true;
+        p.supports_effort_max = true;
+        return p;
+    }
+
+    // Остальные GPT-6.x reasoning-маршруты: без temperature, output <= 64K.
+    if (m.find("gpt-6") != std::string::npos) {
+        p.send_temperature = false;
+        p.max_output_tokens = 65536;
+        p.supports_reasoning_effort = true;
+        return p;
+    }
+
+    // GPT-5.6: без temperature, output <= 64K.
+    if (m.find("gpt-5.6") != std::string::npos) {
+        p.send_temperature = false;
+        p.max_output_tokens = 65536;
+        p.supports_reasoning_effort = true;
+        return p;
+    }
+
+    // Компактные GPT-5.4 reasoning-модели.
+    if (m.find("gpt-5.4-mini") != std::string::npos ||
+        m.find("gpt-5.4-nano") != std::string::npos) {
+        p.send_temperature = false;
+        p.max_output_tokens = 131072;
+        p.supports_reasoning_effort = true;
+        return p;
+    }
+
+    return p;
+}
+
+static bool reasoning_effort_supported(const ModelRouteProfile& p,
+                                       const std::string& effort) {
+    if (!p.supports_reasoning_effort || effort.empty()) return false;
+    if (effort == "low" || effort == "medium" || effort == "high" ||
+        effort == "xhigh")
+        return true;
+    return effort == "max" && p.supports_effort_max;
+}
+
+static int effective_max_tokens(const std::string& model) {
+    const ModelRouteProfile p = model_route_profile(model);
+    int mt = G.max_tokens;
+    if (p.max_output_tokens > 0 && mt > p.max_output_tokens)
+        mt = p.max_output_tokens;
+    return mt;
+}
+
+static json make_model_request(const std::string& model,
+                               const json& messages_out) {
+    const ModelRouteProfile p = model_route_profile(model);
+    json j;
+    j["model"] = model;
+
+    if (p.protocol == ModelProtocol::Anthropic) {
+        // Anthropic Messages API не принимает system как отдельное сообщение.
+        // Системные сообщения передаются полем system, max_tokens обязателен.
+        std::string system_text;
+        json native_messages = json::array();
+        for (const auto& m : messages_out) {
+            const std::string role = m.value("role", std::string());
+            std::string content;
+            if (m.contains("content") && m["content"].is_string())
+                content = m["content"].get<std::string>();
+            else if (m.contains("content"))
+                content = m["content"].dump();
+            if (role == "system") {
+                if (!system_text.empty()) system_text += "\n\n";
+                system_text += content;
+            } else if (role == "user" || role == "assistant") {
+                if (!native_messages.empty() &&
+                    native_messages.back().value("role", "") == role) {
+                    std::string previous =
+                        native_messages.back().value("content", "");
+                    native_messages.back()["content"] =
+                        previous + "\n\n" + content;
+                } else {
+                    native_messages.push_back({
+                        {"role", role},
+                        {"content", content}
+                    });
+                }
+            }
+        }
+        if (!system_text.empty()) j["system"] = system_text;
+        j["messages"] = native_messages;
+        j["max_tokens"] = effective_max_tokens(model);
+        if (p.send_temperature)
+            j["temperature"] = G.temperature;
+        if (reasoning_effort_supported(p, G.reasoning_effort))
+            j["reasoning_effort"] = G.reasoning_effort;
+        return j;
+    }
+
+    j["messages"] = messages_out;
+    if (p.send_temperature)
+        j["temperature"] = G.temperature;
+    if (!p.omit_max_tokens)
+        j["max_tokens"] = effective_max_tokens(model);
+    if (reasoning_effort_supported(p, G.reasoning_effort))
+        j["reasoning_effort"] = G.reasoning_effort;
+    return j;
+}
+
+// 302.ai маскирует несовместимые параметры как HTTP 400/401/404 с err_code=-10003.
+// Последовательно пробуем более консервативные формы payload.
+static json compatible_model_request(json j, int stage,
+                                     ModelProtocol protocol) {
+    j.erase("temperature");
+    j.erase("reasoning_effort");
+    if (protocol == ModelProtocol::Anthropic) {
+        // У части старых Claude-маршрутов лимит ответа ниже общего. После -10003
+        // последовательно уменьшаем output: 32K, 16K, 8K, 4K.
+        static const int anthropic_limits[] = {32768, 16384, 8192, 4096};
+        if (stage >= 0 && stage < 4) {
+            if (j.contains("max_tokens") && j["max_tokens"].is_number_integer() &&
+                j["max_tokens"].get<int>() > anthropic_limits[stage])
+                j["max_tokens"] = anthropic_limits[stage];
+        }
+        return j;
+    }
+    if (stage == 0) {
+        if (j.contains("max_tokens") && j["max_tokens"].is_number_integer() &&
+            j["max_tokens"].get<int>() > 65536)
+            j["max_tokens"] = 65536;
+    } else if (stage == 1) {
+        j.erase("max_tokens");
+    } else if (stage == 2) {
+        int mt = 65536;
+        if (j.contains("max_tokens") && j["max_tokens"].is_number_integer())
+            mt = j["max_tokens"].get<int>();
+        if (mt > 65536) mt = 65536;
+        j.erase("max_tokens");
+        j["max_completion_tokens"] = mt;
+    } else {
+        j.erase("max_tokens");
+        j.erase("max_completion_tokens");
+    }
+    return j;
+}
+
 std::string do_api_request(bool &aborted) {
     aborted = false;
     std::string api_key = get_api_key();
@@ -2640,14 +2844,7 @@ std::string do_api_request(bool &aborted) {
             }
         }
     }
-    json jData = {
-        {"model", G.model},
-        {"messages", messages_out},
-        {"temperature", G.temperature},
-        {"max_tokens", G.max_tokens}
-    };
-    std::string jsonData = jData.dump(-1, ' ', false, json::error_handler_t::replace);
-    std::string chat_url = normalize_api_base(G.api_base) + "/v1/chat/completions";
+    const std::string api_base = normalize_api_base(G.api_base);
 
     // ВАЖНО: curl_slist_append(head, ...) возвращает ТОТ ЖЕ head.
     // unique_ptr::reset(p) освобождает старое значение через deleter, даже
@@ -2662,6 +2859,17 @@ std::string do_api_request(bool &aborted) {
         headers_owner.reset(raw);
     }
     struct curl_slist *headers = headers_owner.get();
+
+    SlistPtr anthropic_headers_owner;
+    {
+        struct curl_slist* raw =
+            curl_slist_append(nullptr, "Content-Type: application/json");
+        std::string anthropic_auth = "x-api-key: " + api_key;
+        raw = curl_slist_append(raw, anthropic_auth.c_str());
+        raw = curl_slist_append(raw, "anthropic-version: 2023-06-01");
+        anthropic_headers_owner.reset(raw);
+    }
+    struct curl_slist *anthropic_headers = anthropic_headers_owner.get();
 
     struct StreamState {
         std::string full_content;
@@ -2711,24 +2919,26 @@ std::string do_api_request(bool &aborted) {
     auto do_attempt = [&](const std::string& model_name, std::string& body_out,
                           long& http_out, CURLcode& curl_out) -> bool {
         StreamState st = {"", false, -1};
-        std::string jsonLocal;
-        if (model_name == G.model) {
-            jsonLocal = jsonData;
-        } else {
-            json jL = jData;
-            jL["model"] = model_name;
-            jsonLocal = jL.dump(-1, ' ', false, json::error_handler_t::replace);
-        }
+        const ModelRouteProfile profile = model_route_profile(model_name);
+        const bool anthropic = profile.protocol == ModelProtocol::Anthropic;
+        const std::string request_url = api_base +
+            (anthropic ? "/v1/messages" : "/v1/chat/completions");
+        struct curl_slist* request_headers =
+            anthropic ? anthropic_headers : headers;
+        const json baseLocal = make_model_request(model_name, messages_out);
+        json jLocal = baseLocal;
+        std::string jsonLocal = jLocal.dump(-1, ' ', false, json::error_handler_t::replace);
 
         int retries = API_MAX_RETRIES; long backoff = API_RETRY_BACKOFF_S; bool ok = false;
+        int compatibility_stage = 0;
         while (retries-- > 0) {
             st.full_content.clear();
             st.retry_after = -1;
             st.header_cleared = false;
-            curl_easy_setopt(curl, CURLOPT_URL, chat_url.c_str());
+            curl_easy_setopt(curl, CURLOPT_URL, request_url.c_str());
             curl_easy_setopt(curl, CURLOPT_POSTFIELDS, jsonLocal.c_str());
             curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, static_cast<long>(jsonLocal.size()));
-            curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+            curl_easy_setopt(curl, CURLOPT_HTTPHEADER, request_headers);
             curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION,
                              static_cast<size_t(*)(void*,size_t,size_t,void*)>(write_cb));
             curl_easy_setopt(curl, CURLOPT_WRITEDATA, &st);
@@ -2754,6 +2964,33 @@ std::string do_api_request(bool &aborted) {
             if (g_stream_abort) {
                 http_out = hc; curl_out = r; body_out = st.full_content;
                 break;
+            }
+            // 302.ai маскирует несовместимые параметры как HTTP 400/401/404 с
+            // err_code=-10003. Последовательно пробуем более совместимые payload.
+            if (compatibility_stage < 4 &&
+                st.full_content.find("-10003") != std::string::npos) {
+                json candidate;
+                bool changed = false;
+                while (compatibility_stage < 4) {
+                    candidate = compatible_model_request(baseLocal, compatibility_stage++,
+                                                               profile.protocol);
+                    if (candidate.dump() != jLocal.dump()) {
+                        changed = true;
+                        break;
+                    }
+                }
+                if (changed) {
+                    jLocal = candidate;
+                    jsonLocal = jLocal.dump(-1, ' ', false,
+                        json::error_handler_t::replace);
+                    // Совместимый повтор не должен съедать сетевой retry.
+                    ++retries;
+                    if (!is_compact())
+                        std::cout << C_YELLOW
+                                  << "[302.ai отклонил параметры; повтор с совместимым payload]"
+                                  << C_RESET << std::endl;
+                    continue;
+                }
             }
             bool retryable = (r == CURLE_OPERATION_TIMEDOUT || r == CURLE_COULDNT_CONNECT ||
                               (hc >= 500 && hc < 600) || hc == 429 || hc == 408);
@@ -2834,7 +3071,16 @@ std::string do_api_request(bool &aborted) {
         return "";
     }
     if (res != CURLE_OK) { std::cerr << C_RED << "curl: " << curl_easy_strerror(res) << C_RESET << std::endl; return ""; }
-    if (http_code != 200) { std::cerr << C_RED << "[HTTP " << http_code << "] " << state.full_content.substr(0, 300) << C_RESET << std::endl; return ""; }
+    if (http_code != 200) {
+        std::cerr << C_RED << "[HTTP " << http_code << "] "
+                  << state.full_content.substr(0, 300) << C_RESET << std::endl;
+        if (state.full_content.find("-10003") != std::string::npos)
+            std::cerr << C_YELLOW
+                      << "[Параметры модели отклонены 302.ai: проверьте /model, /temp, "
+                      << "/maxtokens и /reasoning]"
+                      << C_RESET << std::endl;
+        return "";
+    }
 
     // Информируем пользователя, если реально отвечала fallback-модель
     if (used_model != G.model && !is_compact()) {
@@ -2847,7 +3093,18 @@ std::string do_api_request(bool &aborted) {
         try {
             json j = json::parse(state.full_content);
             json_ok = true;
-            if (j.count("choices") && !j["choices"].empty()) {
+            if (j.contains("content") && j["content"].is_array()) {
+                std::string text;
+                for (const auto& block : j["content"]) {
+                    if (block.is_object() && block.value("type", "") == "text" &&
+                        block.contains("text") && block["text"].is_string())
+                        text += block["text"].get<std::string>();
+                }
+                if (!text.empty())
+                    state.full_content = text;
+                else
+                    state.full_content = "[Ошибка API: модель вернула пустой текстовый ответ]";
+            } else if (j.count("choices") && !j["choices"].empty()) {
                 auto& choice = j["choices"][0];
                 if (choice.count("message") && choice["message"].count("content")) {
                     const auto& content = choice["message"]["content"];
@@ -2878,9 +3135,15 @@ std::string do_api_request(bool &aborted) {
                 }
                 state.full_content = "[Ошибка API: " + emsg + "]";
             }
-            if (j.count("usage")) {
-                G.total_prompt_tokens += j["usage"].value("prompt_tokens", 0);
-                G.total_completion_tokens += j["usage"].value("completion_tokens", 0);
+            if (j.count("usage") && j["usage"].is_object()) {
+                int prompt_tokens = j["usage"].value("prompt_tokens", 0);
+                int completion_tokens = j["usage"].value("completion_tokens", 0);
+                if (prompt_tokens == 0)
+                    prompt_tokens = j["usage"].value("input_tokens", 0);
+                if (completion_tokens == 0)
+                    completion_tokens = j["usage"].value("output_tokens", 0);
+                G.total_prompt_tokens += prompt_tokens;
+                G.total_completion_tokens += completion_tokens;
             }
         } catch (const json::parse_error& e) {
             // 200, но не-JSON: HTML-капча, plain-текст прокси и т.п.
@@ -3528,8 +3791,27 @@ void cmd_about() {
     std::cout << C_CYAN << C_BOLD << "  === Chat CLI ===" << C_RESET << std::endl;
     std::cout << "  Версия:   " << C_GREEN << APP_VERSION << C_RESET << std::endl;
     std::cout << "  Модель:   " << C_GREEN << G.model << C_RESET << std::endl;
-    std::cout << "  Temp:     " << C_GREEN << G.temperature << C_RESET << std::endl;
-    std::cout << "  Max tok:  " << C_GREEN << G.max_tokens << C_RESET << std::endl;
+    const ModelRouteProfile rp = model_route_profile(G.model);
+    std::cout << "  Temp:     " << C_GREEN << G.temperature << C_RESET;
+    if (!rp.send_temperature)
+        std::cout << C_GRAY << " (не отправляется этому маршруту)";
+    std::cout << C_RESET << std::endl;
+    std::cout << "  Max tok:  " << C_GREEN << G.max_tokens << C_RESET;
+    if (rp.omit_max_tokens)
+        std::cout << C_GRAY << " (не отправляется этому маршруту)";
+    else if (effective_max_tokens(G.model) != G.max_tokens)
+        std::cout << C_GRAY << " (эффективно: "
+                  << effective_max_tokens(G.model) << ")";
+    std::cout << C_RESET << std::endl;
+    std::cout << "  Reasoning:" << C_GREEN
+              << (G.reasoning_effort.empty() ? " auto" : " " + G.reasoning_effort)
+              << C_RESET;
+    if (!rp.supports_reasoning_effort)
+        std::cout << C_GRAY << " (маршрут не поддерживает)";
+    else if (!G.reasoning_effort.empty() &&
+             !reasoning_effort_supported(rp, G.reasoning_effort))
+        std::cout << C_GRAY << " (выбранный уровень не отправляется)";
+    std::cout << C_RESET << std::endl;
     std::cout << "  Autorun:  " << (G.autorun ? C_GREEN "вкл" : C_RED "выкл") << C_RESET << std::endl;
     std::cout << "  History:  " << (G.history_enabled ? C_GREEN "вкл" : C_RED "выкл") << C_RESET << std::endl;
     std::cout << "  NoRes:    " << (G.nores ? C_RED "вкл" : C_GREEN "выкл") << " (скрытие вывода bash)" << C_RESET << std::endl;
@@ -3985,6 +4267,49 @@ void cmd_model_select() {
     }
 }
 
+void cmd_reasoning(const std::string& arg) {
+    const ModelRouteProfile p = model_route_profile(G.model);
+    const std::string effort = to_lower_copy(arg);
+    if (effort.empty()) {
+        std::cout << C_YELLOW << "[Reasoning: "
+                  << (G.reasoning_effort.empty() ? "auto" : G.reasoning_effort)
+                  << "]";
+        if (!p.supports_reasoning_effort)
+            std::cout << C_GRAY << " (маршрут не принимает reasoning_effort)";
+        else if (!G.reasoning_effort.empty() &&
+                 !reasoning_effort_supported(p, G.reasoning_effort))
+            std::cout << C_GRAY << " (выбранный уровень не отправляется)";
+        std::cout << C_RESET << std::endl;
+        return;
+    }
+    if (effort == "auto" || effort == "off" || effort == "default") {
+        G.reasoning_effort.clear();
+        save_config();
+        std::cout << C_YELLOW << "[Reasoning: auto]" << C_RESET << std::endl;
+        return;
+    }
+    if (effort != "low" && effort != "medium" && effort != "high" &&
+        effort != "xhigh" && effort != "max") {
+        std::cerr << C_RED << "[Уровень: low|medium|high|xhigh|max|auto]"
+                  << C_RESET << std::endl;
+        return;
+    }
+    if (!p.supports_reasoning_effort) {
+        std::cerr << C_RED << "[Этот маршрут не принимает reasoning_effort]"
+                  << C_RESET << std::endl;
+        return;
+    }
+    if (!reasoning_effort_supported(p, effort)) {
+        std::cerr << C_RED << "[Этот маршрут не принимает уровень: " << effort
+                  << "]" << C_RESET << std::endl;
+        return;
+    }
+    G.reasoning_effort = effort;
+    save_config();
+    std::cout << C_GREEN << "[Reasoning: " << effort << "]"
+              << C_RESET << std::endl;
+}
+
 void print_help(bool full = false) {
     // D7: short by default, /help all for full
     if (!full) {
@@ -3993,7 +4318,7 @@ void print_help(bool full = false) {
             << "  /help all          — полная справка\n"
             << "  /model /models     — модель; /models claude sonnet | /model N|имя\n"
             << "  /apibase [url]     — API base (E3)\n"
-            << "  /temp /maxtokens   — параметры генерации\n"
+            << "  /temp /maxtokens /reasoning — параметры генерации\n"
             << "  /file /save /load /history /clear /cls /view_sc /think /delete /retry\n"
             << "  /voice /speak /listen — голос (Termux API: STT+TTS)\n"
             << "  /autorun /nores /compact /dryrun /tokens /cost /balance\n"
@@ -4023,6 +4348,7 @@ void print_help(bool full = false) {
         << "  /apibase [url]     — показать/задать API base (default 302.ai)\n"
         << "  /temp [0.0-2.0]    — показать/сменить температуру\n"
         << "  /maxtokens [N]     — показать/сменить max_tokens\n"
+        << "  /reasoning [ур.]   — auto|low|medium|high|xhigh|max (если маршрут поддерживает)\n"
         << "  /system            — показать системный промпт\n"
         << "  /file <path> [msg] — загрузить файл и задать вопрос\n"
         << "  /voice             — вкл/выкл голосовой режим (инверсия)\n"
@@ -4230,10 +4556,22 @@ void print_context() {
     std::cout << C_MAGENTA << "  Оценка токенов: " << C_RESET << "~"
               << approx_tokens_messages() << "  (chars/4+6/msg)\n";
 
+    const ModelRouteProfile rp = model_route_profile(G.model);
     std::cout << C_MAGENTA << "  При отправке: " << C_RESET;
     if (G.time_prefix) std::cout << "префикс даты-времени МСК; ";
-    std::cout << "model " << G.model << ", temp " << G.temperature
-              << ", max_tokens " << G.max_tokens << "\n";
+    std::cout << "model " << G.model << ", ";
+    if (rp.send_temperature)
+        std::cout << "temp " << G.temperature << ", ";
+    else
+        std::cout << "temp не отправляется, ";
+    if (rp.omit_max_tokens)
+        std::cout << "max_tokens не отправляется";
+    else
+        std::cout << "max_tokens " << effective_max_tokens(G.model);
+    std::cout << ", reasoning "
+              << (reasoning_effort_supported(rp, G.reasoning_effort)
+                    ? G.reasoning_effort : std::string("auto/не отправляется"))
+              << "\n";
 
     std::cout << C_MAGENTA << "  API: " << C_RESET
               << normalize_api_base(G.api_base) << "\n";
@@ -5485,6 +5823,9 @@ int main(int argc, char *argv[]) {
                 std::cout << C_YELLOW << "[max_tokens: " << G.max_tokens
                           << "]" << C_RESET << std::endl;
             }
+            continue;
+        } else if (match_command(userAnswer, "/reasoning")) {
+            cmd_reasoning(command_arg(userAnswer, "/reasoning"));
             continue;
         } else if (userAnswer[0] == '/') {
             std::cerr << C_RED << "[Неизвестная команда: " << userAnswer
