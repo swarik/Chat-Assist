@@ -20,6 +20,8 @@
 #include <signal.h>
 #include <sys/wait.h>
 #include <sstream>
+#include <locale>
+#include <termios.h>
 #include <atomic>
 #include <thread>
 #include <chrono>
@@ -36,7 +38,7 @@
 
 using json = nlohmann::json;
 // ─────────────────────────── Версия ───────────────────────────
-#define APP_VERSION "1.4.79"
+#define APP_VERSION "1.4.80"
 
 
 // Emoji_Presentation: всегда отображается как emoji (ширина 2)
@@ -1159,9 +1161,13 @@ static void note_yellow(const std::string& s) {
 //          1 = YES, 2 = ALL (только при allow_all=true, для "a/в").
 static int ask_yes_no(const char* prompt, bool allow_all = false) {
     std::cout.flush(); fflush(stdout);
+    // Сбрасываем ввод, набранный до вопроса (случайные нажатия во время выполнения).
+    tcflush(STDIN_FILENO, TCIFLUSH);
     char* rl = readline(prompt);
     if (!rl) return 0;
     std::string ans(rl); free(rl);
+    // Сбрасываем лишние символы, набранные после ответа: иначе они станут ответом на следующий блок.
+    tcflush(STDIN_FILENO, TCIFLUSH);
     while (!ans.empty() && (ans.front() == ' ' || ans.front() == '\t')) ans.erase(0, 1);
     while (!ans.empty() && (ans.back() == ' ' || ans.back() == '\t' ||
                             ans.back() == '\r' || ans.back() == '\n')) ans.pop_back();
@@ -3956,7 +3962,17 @@ static double json_price_to_per_mtok(const json& v) {
     // Accept: 0.26 meaning $/MTok, or micro-prices; prefer explicit object fields.
     try {
         if (v.is_number()) return v.get<double>();
-        if (v.is_string()) return std::stod(v.get<std::string>());
+        if (v.is_string()) {
+            // API 302.ai отдаёт строки вида "$1.000 / M tokens"
+            std::string t = v.get<std::string>();
+            size_t i = t.find_first_of("0123456789");
+            if (i == std::string::npos) return -1.0;
+            std::istringstream iss(t.substr(i));
+            iss.imbue(std::locale::classic());
+            double d = -1.0;
+            iss >> d;
+            return iss.fail() ? -1.0 : d;
+        }
     } catch (...) {}
     return -1.0;
 }
@@ -3970,6 +3986,12 @@ static void extract_pricing_from_model_obj(const json& m, const std::string& id)
         if (pr.count("completion")) c = json_price_to_per_mtok(pr["completion"]);
         if (pr.count("input")) p = json_price_to_per_mtok(pr["input"]);
         if (pr.count("output")) c = json_price_to_per_mtok(pr["output"]);
+    }
+    if (m.count("price") && m["price"].is_object()) {
+        // формат 302.ai: price.input_token / price.output_token (строки "$X / M tokens")
+        const auto& pr = m["price"];
+        if (p < 0 && pr.count("input_token")) p = json_price_to_per_mtok(pr["input_token"]);
+        if (c < 0 && pr.count("output_token")) c = json_price_to_per_mtok(pr["output_token"]);
     }
     if (p < 0 && m.count("prompt_price")) p = json_price_to_per_mtok(m["prompt_price"]);
     if (c < 0 && m.count("completion_price")) c = json_price_to_per_mtok(m["completion_price"]);
