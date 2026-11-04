@@ -36,7 +36,7 @@
 
 using json = nlohmann::json;
 // ─────────────────────────── Версия ───────────────────────────
-#define APP_VERSION "1.4.77"
+#define APP_VERSION "1.4.78"
 
 
 // Emoji_Presentation: всегда отображается как emoji (ширина 2)
@@ -2849,13 +2849,33 @@ std::string do_api_request(bool &aborted) {
             json_ok = true;
             if (j.count("choices") && !j["choices"].empty()) {
                 auto& choice = j["choices"][0];
-                if (choice.count("message") && choice["message"].count("content"))
-                    state.full_content = choice["message"]["content"].get<std::string>();
+                if (choice.count("message") && choice["message"].count("content")) {
+                    const auto& content = choice["message"]["content"];
+                    if (content.is_string()) {
+                        state.full_content = content.get<std::string>();
+                    } else if (content.is_null()) {
+                        std::string reason = "unknown";
+                        if (choice.contains("finish_reason") &&
+                            choice["finish_reason"].is_string()) {
+                            reason = choice["finish_reason"].get<std::string>();
+                        }
+                        state.full_content =
+                            "[Ошибка API: модель вернула пустой content "
+                            "(finish_reason=" + reason + ")]";
+                    } else {
+                        state.full_content = content.dump();
+                    }
+                }
             } else if (j.count("error")) {
                 // OpenRouter/302 кладут ошибку в {"error": {...}} при HTTP 200.
-                std::string emsg = j["error"].is_string()
-                    ? j["error"].get<std::string>()
-                    : j["error"].value("message", std::string("unknown error"));
+                std::string emsg = "unknown error";
+                if (j["error"].is_string()) {
+                    emsg = j["error"].get<std::string>();
+                } else if (j["error"].is_object() &&
+                           j["error"].contains("message") &&
+                           j["error"]["message"].is_string()) {
+                    emsg = j["error"]["message"].get<std::string>();
+                }
                 state.full_content = "[Ошибка API: " + emsg + "]";
             }
             if (j.count("usage")) {
@@ -2871,6 +2891,19 @@ std::string do_api_request(bool &aborted) {
                               std::to_string(http_code) + "): " + head + "]";
             if (!is_compact())
                 std::cerr << C_RED << "[parse: " << e.what() << "]" << C_RESET << std::endl;
+            return msg;
+        } catch (const json::exception& e) {
+            // Структура JSON неожиданная: не роняем весь клиент.
+            std::string head = state.full_content.substr(0, 200);
+            for (char& ch : head) {
+                if ((static_cast<unsigned char>(ch) < 0x20) &&
+                    ch != '\n' && ch != '\t') ch = '?';
+            }
+            std::string msg = "[Ошибка структуры ответа API: " +
+                              std::string(e.what()) + "]";
+            if (!is_compact())
+                std::cerr << C_RED << "[json: " << e.what() << "] " << head
+                          << C_RESET << std::endl;
             return msg;
         }
         if (!json_ok) return "";
