@@ -3776,21 +3776,63 @@ void cmd_update() {
 }
 
 void cmd_balance() {
-    // 302.ai: no OpenRouter-style credits API in this client.
-    // Honest status + local session token stats (never print full key).
-    std::string api_key = get_api_key();
-    std::cout << C_CYAN << C_BOLD << "  === Balance / Usage ===" << C_RESET << std::endl;
-    if (api_key.empty()) {
-        std::cout << C_RED << "  API key: not found" << C_RESET << std::endl;
-    } else {
-        std::string tail = api_key.size() > 4 ? api_key.substr(api_key.size() - 4) : api_key;
-        std::cout << "  API key: " << C_GREEN << "ok" << C_RESET
-                  << C_GRAY << " (....." << tail << ")" << C_RESET << std::endl;
+    std::cout << C_CYAN << C_BOLD << "  === Balance ===" << C_RESET << std::endl;
+    const std::string base = normalize_api_base(G.api_base);
+    if (base != "https://api.302.ai" && base != "https://api.302ai.cn") {
+        std::cout << C_YELLOW << "  Баланс: неподдерживаемый провайдер (" << base << ")" << C_RESET << std::endl;
+        return;
     }
-    std::cout << "  Provider: " << C_GRAY << normalize_api_base(G.api_base) << C_RESET << std::endl;
-    std::cout << "  Balance:  " << C_YELLOW << "check in 302.ai dashboard" << C_RESET << std::endl;
-    std::cout << "  Session:  " << C_GREEN << G.total_prompt_tokens << C_RESET << " prompt + "
-              << C_GREEN << G.total_completion_tokens << C_RESET << " completion" << std::endl;
+    const std::string key = get_api_key();
+    if (key.empty()) {
+        std::cout << C_RED << "  API key: не найден" << C_RESET << std::endl;
+        return;
+    }
+    CurlPtr owner(curl_easy_init());
+    CURL* curl = owner.get();
+    if (!curl) {
+        std::cout << C_RED << "  Ошибка инициализации curl" << C_RESET << std::endl;
+        return;
+    }
+    std::string body, auth = "Authorization: Bearer " + key;
+    struct curl_slist* headers = curl_slist_append(nullptr, auth.c_str());
+    if (!headers) {
+        std::cout << C_RED << "  Ошибка выделения памяти для запроса" << C_RESET << std::endl;
+        return;
+    }
+    const std::string url = base + "/dashboard/balance";
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &body);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 15L);
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 0L);
+    CURLcode result = curl_easy_perform(curl);
+    long status = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
+    curl_slist_free_all(headers);
+    if (result != CURLE_OK) {
+        std::cout << C_RED << "  Ошибка сети: " << curl_easy_strerror(result) << C_RESET << std::endl;
+        return;
+    }
+    if (status != 200) {
+        std::cout << C_RED << "  Баланс недоступен: HTTP " << status << C_RESET << std::endl;
+        if (status == 403)
+            std::cout << C_YELLOW << "  Проверьте разрешение API-ключа на Balance в кабинете 302.AI." << C_RESET << std::endl;
+        return;
+    }
+    try {
+        auto j = json::parse(body);
+        const auto& balance = j.at("data").at("balance");
+        if (balance.is_string())
+            std::cout << "  Баланс аккаунта: " << C_GREEN << balance.get<std::string>() << C_RESET << std::endl;
+        else if (balance.is_number())
+            std::cout << "  Баланс аккаунта: " << C_GREEN << balance.dump() << C_RESET << std::endl;
+        else throw std::runtime_error("invalid balance");
+    } catch (const std::exception&) {
+        std::cout << C_RED << "  Не удалось разобрать ответ API баланса" << C_RESET << std::endl;
+    }
 }
 
 void cmd_about() {
@@ -3839,7 +3881,6 @@ void cmd_about() {
     std::cout << "  Sessions: " << C_GRAY << SESSIONS_DIR << C_RESET << std::endl;
     std::cout << "  History:  " << C_GRAY << HISTORY_FILE << C_RESET << std::endl;
     std::cout << "  Readline: " << C_GRAY << READLINE_HIST_FILE << C_RESET << std::endl;
-    cmd_balance();
 }
 
 // ─────────────────────────── Сигнал / выход ──────────────────
@@ -4398,7 +4439,7 @@ void print_help(bool full = false) {
         << "  /dryrun            — вкл/выкл dry-run bash-блоков (не выполнять, только показывать)\n"
         << "  /compact           — тихий режим (plain, без подсказок/spinner)\n"
         << "  /cost [live]       — стоимость токенов ($); live — подтянуть цены API\n"
-        << "  /balance           — ключ/провайдер и токены сессии\n"
+        << "  /balance           — баланс аккаунта 302.AI\n"
         << "  /update            — обновление программы (+ preview изменений)\n"
         << "  /about             — информация о программе\n"
         << "  /new [name]        — создать новую сессию\n"
