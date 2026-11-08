@@ -38,7 +38,7 @@
 
 using json = nlohmann::json;
 // ─────────────────────────── Версия ───────────────────────────
-#define APP_VERSION "1.4.84"
+#define APP_VERSION "1.4.85"
 
 
 // Emoji_Presentation: всегда отображается как emoji (ширина 2)
@@ -2730,6 +2730,14 @@ static ModelRouteProfile model_route_profile(const std::string& model) {
         p.send_temperature = false;
         p.max_output_tokens = 131072;
         p.supports_reasoning_effort = true;
+        return p;
+    }
+
+    // DeepSeek V4.1 reasoning-маршруты (302.ai). Проверено 08.11.2026:
+    // reasoning_effort принимается, max даёт втрое-вчетверо больше reasoning-токенов.
+    if (m.find("deepseek") != std::string::npos) {
+        p.supports_reasoning_effort = true;
+        p.supports_effort_max = true;
         return p;
     }
 
@@ -5653,6 +5661,7 @@ int main(int argc, char *argv[]) {
         }
         if (userAnswer == "/debug") {
             G.debug_raw = !G.debug_raw;
+            save_config();
             std::cout << C_GREEN << "[debug " << (G.debug_raw ? "ВКЛЮЧЁН" : "выключен")
                       << ": сырой JSON API -> ~/tmp/api_raw.json]" << C_RESET << std::endl;
             continue;
