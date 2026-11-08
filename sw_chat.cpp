@@ -38,7 +38,7 @@
 
 using json = nlohmann::json;
 // ─────────────────────────── Версия ───────────────────────────
-#define APP_VERSION "1.4.80"
+#define APP_VERSION "1.4.82"
 
 
 // Emoji_Presentation: всегда отображается как emoji (ширина 2)
@@ -207,7 +207,7 @@ static std::string get_home_dir() {
 #define RL_HIST_MAX_CHARS   2000
 #define MAX_BASH_CHAIN      7
 
-#define MAX_MESSAGES        500
+#define MAX_MESSAGES        2000
 #define DEFAULT_TEMPERATURE 0.7
 #define DEFAULT_MAX_TOKENS  4096
 #define DEFAULT_API_BASE    "https://api.302.ai"
@@ -1541,7 +1541,13 @@ static bool c_has_word(const std::string& c, const char* tok) {
     size_t p = 0;
     while ((p = c.find(tok, p)) != std::string::npos) {
         size_t after = p + tl;
-        if (after >= c.size() || c[after] == ' ') return true;
+        // Границей слова считается любой разделитель команд, а не только
+        // пробел: иначе "rm -rf /;" и "rm -rf /|cat" проходили фильтр.
+        if (after >= c.size()) return true;
+        char ch = c[after];
+        if (ch == ' ' || ch == ';' || ch == '|' || ch == '&' ||
+            ch == ')' || ch == '(' || ch == '`' || ch == '>' || ch == '<')
+            return true;
         p = after;
     }
     return false;
@@ -2288,14 +2294,14 @@ static std::string build_local_summary(const std::vector<json>& msgs, int from, 
                 sp = false;
             }
         }
-        out += "- " + role + ": " + clip_for_summary(flat, 180) + "\n";
-        if (++n >= 24) {
+        out += "- " + role + ": " + clip_for_summary(flat, 600) + "\n";
+        if (++n >= 60) {
             out += "- ...\n";
             break;
         }
     }
     if (n == 0) out += "(no user/assistant messages)\n";
-    if (out.size() > 3500) out = clip_for_summary(out, 3500);
+    if (out.size() > 12000) out = clip_for_summary(out, 12000);
     return out;
 }
 
@@ -2321,7 +2327,7 @@ static void smart_trim_context() {
         G.messages[sys_idx]["content"].is_string())
         sys_size = G.messages[sys_idx]["content"].get<std::string>().size();
 
-    const size_t SUMMARY_RESERVE = 4000;
+    const size_t SUMMARY_RESERVE = 14000;
     size_t budget = (MAX_CHARS > sys_size + SUMMARY_RESERVE)
         ? (MAX_CHARS - sys_size - SUMMARY_RESERVE)
         : ((MAX_CHARS > sys_size) ? (MAX_CHARS - sys_size) : 0);
@@ -3122,9 +3128,24 @@ std::string do_api_request(bool &aborted) {
                             choice["finish_reason"].is_string()) {
                             reason = choice["finish_reason"].get<std::string>();
                         }
-                        state.full_content =
-                            "[Ошибка API: модель вернула пустой content "
-                            "(finish_reason=" + reason + ")]";
+                        // reasoning-модели (deepseek-v4.1 и др.) иногда кладут
+                        // весь текст в reasoning_content, оставляя content=null.
+                        // Не теряем ответ: берём рассуждение как тело.
+                        std::string alt;
+                        for (const char* k : {"reasoning_content", "reasoning"}) {
+                            if (choice["message"].contains(k) &&
+                                choice["message"][k].is_string()) {
+                                std::string v = choice["message"][k].get<std::string>();
+                                if (!v.empty()) { alt = v; break; }
+                            }
+                        }
+                        if (!alt.empty()) {
+                            state.full_content = alt;
+                        } else {
+                            state.full_content =
+                                "[Ошибка API: модель вернула пустой content "
+                                "(finish_reason=" + reason + ")]";
+                        }
                     } else {
                         state.full_content = content.dump();
                     }
@@ -3400,7 +3421,7 @@ void process_response(const std::string &content_in, bool aborted, size_t msgs_b
         }
         // Отправляем результат bash модели
         std::string user_msg = "[Результат выполнения команды]:\n" + cmd_result;
-        G.messages.push_back({{"role", "user"}, {"content", user_msg}});
+        G.messages.push_back({{"role", "user"}, {"content", clamp_message_content(user_msg)}});
 
         bool chain_aborted = false;
         std::string next = do_api_request(chain_aborted);
