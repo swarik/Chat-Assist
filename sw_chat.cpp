@@ -38,7 +38,7 @@
 
 using json = nlohmann::json;
 // ─────────────────────────── Версия ───────────────────────────
-#define APP_VERSION "1.4.82"
+#define APP_VERSION "1.4.84"
 
 
 // Emoji_Presentation: всегда отображается как emoji (ширина 2)
@@ -280,6 +280,7 @@ struct ChatSession {
     std::string       api_base                 = DEFAULT_API_BASE;
     bool              view_sc                  = false; // /view_sc on: полный текст self-check; off: только [SC]
     bool              think                    = false; // /think on: показывать блоки think; off: скрывать
+    bool              debug_raw                = false; // /debug on: писать сырой JSON ответа API
     std::string       reasoning_effort         = ""; // пусто=auto; low|medium|high|xhigh|max
     std::unordered_map<std::string, std::string> aliases;
 };
@@ -2083,6 +2084,7 @@ static void save_config() {
         j["time_prefix"]=G.time_prefix;
         j["view_sc"]=G.view_sc;
         j["think"]=G.think;
+        j["debug_raw"]=G.debug_raw;
         j["reasoning_effort"]=G.reasoning_effort;
         j["voice_in"]=G.voice_in; j["voice_out"]=G.voice_out;
         j["voice_lang"]=G.voice_lang; j["voice_region"]=G.voice_region;
@@ -2111,6 +2113,7 @@ static void load_config() {
         if (j.count("autorun"))     G.autorun     = j["autorun"];
         if (j.count("history_enabled")) G.history_enabled = j["history_enabled"];
         if (j.count("nores"))       G.nores       = j["nores"];
+        if (j.count("debug_raw"))   G.debug_raw   = j["debug_raw"];
         if(j.count("compact_mode")) G.compact_mode=j["compact_mode"];
         if(j.count("fire")) G.fire=j["fire"];
         if(j.count("fire_level") && j["fire_level"].is_number_integer()) {
@@ -2354,21 +2357,41 @@ static void smart_trim_context() {
     }
 
     int erase_start = (sys_idx >= 0) ? (sys_idx + 1) : 0;
+    // FIX(1.4.83): раньше старый summary ПРОПУСКАЛСЯ (erase_start++), а новый
+    // вставлялся следом — блоки копились, и модель видела несколько версий
+    // одного прошлого. Теперь прежний summary поглощается: его тело вливается
+    // в новый, а сам он стирается вместе с диапазоном. Ровно один summary.
+    std::string prev_summary_body;
     if (erase_start < static_cast<int>(G.messages.size()) &&
         G.messages[erase_start].count("role") &&
         G.messages[erase_start]["role"] == "system" &&
         G.messages[erase_start].count("content") &&
         G.messages[erase_start]["content"].is_string()) {
         std::string c = G.messages[erase_start]["content"].get<std::string>();
-        if (c.rfind("[SUMMARY of trimmed context]", 0) == 0)
-            erase_start++;
+        const std::string hdr = "[SUMMARY of trimmed context]";
+        if (c.rfind(hdr, 0) == 0) {
+            prev_summary_body = c.substr(hdr.size());
+            while (!prev_summary_body.empty() &&
+                   (prev_summary_body.front() == '\n' || prev_summary_body.front() == ' '))
+                prev_summary_body.erase(prev_summary_body.begin());
+        }
     }
 
     if (split_idx > erase_start) {
         std::string summary = build_local_summary(G.messages, erase_start, split_idx);
+        if (!prev_summary_body.empty()) {
+            const std::string hdr = "[SUMMARY of trimmed context]\n";
+            std::string body = summary;
+            if (body.rfind(hdr, 0) == 0) body = body.substr(hdr.size());
+            std::string merged = hdr + prev_summary_body + body;
+            if (merged.size() > 12000) merged = clip_for_summary(merged, 12000);
+            summary = merged;
+        }
         if (!is_compact()) {
             std::cout << C_GRAY << "[Trim: " << erase_start << "-" << (split_idx - 1)
-                      << " -> summary " << summary.size() << " bytes]" << C_RESET << std::endl;
+                      << " -> summary " << summary.size() << " bytes]"
+                      << (prev_summary_body.empty() ? "" : " (поглощён прежний summary)")
+                      << C_RESET << std::endl;
         }
         G.messages.erase(G.messages.begin() + erase_start, G.messages.begin() + split_idx);
         json sum = {{"role", "system"}, {"content", summary}};
@@ -2385,7 +2408,7 @@ static char** cmd_completion(const char* text, int start, int end) {
     rl_attempted_completion_over = 1;
     std::vector<std::string> matches;
     std::string t(text);
-    static const std::vector<std::string> cmds = {"/help","/save","/load","/clear","/history","/delete","/retry","/tokens","/context","/model","/models","/apibase","/temp","/maxtokens","/reasoning","/system","/file","/autorun","/nores","/compact","/cost","/balance","/update","/about","/exit","/new","/list","/switch","/rename","/undo","/alias","/search","/export","/info","/dump","/voice","/speak","/listen","/FIRE","/time","/cls","/view_sc","/think"};
+    static const std::vector<std::string> cmds = {"/help","/save","/load","/clear","/history","/delete","/retry","/tokens","/context","/model","/models","/apibase","/temp","/maxtokens","/reasoning","/system","/file","/autorun","/nores","/compact","/cost","/balance","/update","/about","/exit","/new","/list","/switch","/rename","/undo","/alias","/search","/export","/info","/dump","/voice","/speak","/listen","/FIRE","/time","/cls","/view_sc","/think","/debug"};
     
     try {
         if (start == 0) {
@@ -3004,8 +3027,20 @@ std::string do_api_request(bool &aborted) {
                     continue;
                 }
             }
-            bool retryable = (r == CURLE_OPERATION_TIMEDOUT || r == CURLE_COULDNT_CONNECT ||
+            // FIX(1.4.83): таймаут с УЖЕ полученным частичным ответом не повторяем.
+            // Запрос дошёл, модель работала; повтор заставит её сделать то же ещё раз
+            // (для bash-блоков это буквальное двойное выполнение команд).
+            const bool partial_answer = !st.full_content.empty();
+            bool retryable = (r == CURLE_COULDNT_CONNECT ||
+                              (r == CURLE_OPERATION_TIMEDOUT && !partial_answer) ||
                               (hc >= 500 && hc < 600) || hc == 429 || hc == 408);
+            if (partial_answer && r == CURLE_OPERATION_TIMEDOUT) {
+                if (!is_compact())
+                    std::cout << C_YELLOW
+                              << "[Таймаут после частичного ответа: повтор отменён,"
+                                 " чтобы не выполнить команды дважды]"
+                              << C_RESET << std::endl;
+            }
             if (!retryable || retries == 0) {
                 http_out = hc; curl_out = r; body_out = st.full_content;
                 break;
@@ -3101,6 +3136,34 @@ std::string do_api_request(bool &aborted) {
     }
 
     {
+        if (G.debug_raw) {
+            try {
+                std::ofstream df(get_home_dir() + "/tmp/api_raw.json");
+                if (df.is_open()) { df << state.full_content; df.close(); }
+                json dj = json::parse(state.full_content, nullptr, false);
+                std::string info = "не JSON с choices";
+                if (!dj.is_discarded() && dj.contains("choices") && !dj["choices"].empty()) {
+                    auto& ch = dj["choices"][0];
+                    auto& m = ch["message"];
+                    std::string fr = "?";
+                    if (ch.contains("finish_reason") && ch["finish_reason"].is_string())
+                        fr = ch["finish_reason"].get<std::string>();
+                    std::string ct = "absent"; size_t clen = 0, rlen = 0;
+                    if (m.contains("content")) {
+                        if (m["content"].is_null()) ct = "null";
+                        else { ct = m["content"].type_name();
+                               if (m["content"].is_string()) clen = m["content"].get<std::string>().size(); }
+                    }
+                    if (m.contains("reasoning_content") && m["reasoning_content"].is_string())
+                        rlen = m["reasoning_content"].get<std::string>().size();
+                    info = "finish=" + fr + " content=" + ct + "/" + std::to_string(clen) + "B"
+                         + " reasoning=" + std::to_string(rlen) + "B";
+                }
+                std::cout << C_GRAY << "[debug: " << info << " raw="
+                          << state.full_content.size() << "B -> ~/tmp/api_raw.json]"
+                          << C_RESET << std::endl;
+            } catch (...) {}
+        }
         bool json_ok = false;
         try {
             json j = json::parse(state.full_content);
@@ -4473,6 +4536,7 @@ void print_help(bool full = false) {
         << "  /export [fmt] [f]  — экспорт диалога (md/txt/json), по умолчанию ~/tmp/dialog_export.<fmt>\n"
         << "  /info N            — показать сообщение N полностью\n"
         << "  /dump [file]       — сохранить последний вывод bash (~/tmp/last_bash.txt)\n"
+        << "  /debug             — вкл/выкл дамп сырого JSON ответа API (~/tmp/api_raw.json)\n"
         << "  /help [all]        — краткая / полная справка\n"
         << "  /exit              — выход\n"
         << "\nМногострочный ввод:\n"
@@ -5587,6 +5651,12 @@ int main(int argc, char *argv[]) {
             }
             continue;
         }
+        if (userAnswer == "/debug") {
+            G.debug_raw = !G.debug_raw;
+            std::cout << C_GREEN << "[debug " << (G.debug_raw ? "ВКЛЮЧЁН" : "выключен")
+                      << ": сырой JSON API -> ~/tmp/api_raw.json]" << C_RESET << std::endl;
+            continue;
+        }
         if (userAnswer == "/nores") {
             G.nores = !G.nores;
             save_config();
@@ -5763,6 +5833,25 @@ int main(int argc, char *argv[]) {
                 std::cout << C_GRAY << "[Нет пользовательского сообщения для повтора]"
                           << C_RESET << std::endl;
                 continue;
+            }
+            // FIX(1.4.83): не повторять вслепую. Если журнал остался в state=sent,
+            // запрос мог дойти до модели и ответ не вернулся — повтор рискует
+            // выполнить те же bash-команды второй раз. Спрашиваем явно.
+            {
+                json ij;
+                if (inflight_load(ij) && ij.value("state", std::string()) == "sent") {
+                    std::cout << C_YELLOW
+                              << "[!] Незавершённый запрос (state=sent): ответ мог быть получен."
+                              << C_RESET << "\n"
+                              << C_GRAY
+                              << "    Повтор отправит тот же текст заново — возможен дубль"
+                                 " и повторное выполнение команд."
+                              << C_RESET << std::endl;
+                    if (ask_yes_no(C_YELLOW "[Повторить всё равно? (y/n | д/н)]: " C_RESET) != 1) {
+                        std::cout << C_GREEN << "[Повтор отменён]" << C_RESET << std::endl;
+                        continue;
+                    }
+                }
             }
             push_undo_snapshot();
             if (last_assistant > last_user) {
