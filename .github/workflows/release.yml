@@ -105,41 +105,76 @@ jobs:
 
   termux:
     # Termux-бинарь собирается в нативном arm64-контейнере Termux.
-    # Джоба НЕОБЯЗАТЕЛЬНАЯ: образ termux-docker старый, зеркала Termux переезжают,
-    # сборка может упасть по внешним причинам. continue-on-error гарантирует,
-    # что релиз выйдет без Termux-файла, а не будет отменён целиком.
+    # Джоба НЕОБЯЗАТЕЛЬНАЯ для релиза (continue-on-error), но внутри себя честная:
+    # провал сборки виден как failure, а полный лог кладётся в артефакт termux-build-log,
+    # потому что логи джоб без admin-прав не читаются.
     runs-on: ubuntu-24.04-arm
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
 
       - name: Build inside Termux (aarch64)
+        id: build
         run: |
           mkdir -p dist
-          if ! docker pull termux/termux-docker:aarch64; then
-            echo "::warning::Образ termux-docker недоступен — Termux-бинарь не собран"
-            exit 0
+          LOG=termux-build.log
+          : > "$LOG"
+          echo "=== docker pull ===" | tee -a "$LOG"
+          if ! docker pull termux/termux-docker:aarch64 2>&1 | tee -a "$LOG"; then
+            echo "::error::Образ termux-docker:aarch64 не скачался"
+            echo "failed=pull" >> "$GITHUB_OUTPUT"
+            exit 1
           fi
-          # pkg в образе требует обновления индексов; -i нужен, т.к. pkg иногда ждёт TTY.
-          if ! docker run --rm -i -v "$PWD:/src" -w /src termux/termux-docker:aarch64 bash -lc '
-            set -e
-            yes | pkg update -y || true
-            yes | pkg upgrade -y || true
+          echo "=== docker run ===" | tee -a "$LOG"
+          set +e
+          docker run --rm -i -v "$PWD:/src" -w /src termux/termux-docker:aarch64 bash -lc '
+            set -x
+            echo "--- pkg update ---"
+            yes | pkg update -y
+            echo "--- pkg upgrade ---"
+            yes | pkg upgrade -y
+            echo "--- pkg install ---"
             pkg install -y clang make readline libcurl curl
+            echo "--- json.hpp ---"
             mkdir -p "$HOME/.local/include/nlohmann"
             curl -fsSL "https://github.com/nlohmann/json/releases/download/v3.11.3/json.hpp" -o "$HOME/.local/include/nlohmann/json.hpp"
+            echo "--- compile ---"
             clang++ -std=c++17 -O2 -I"$HOME/.local/include" -o dist/sw_chat-termux-aarch64 sw_chat.cpp -lreadline -lcurl -lpthread
-          '; then
-            echo "::warning::Сборка под Termux не удалась (внешняя причина) — релиз выходит без этого файла"
-            exit 0
+            echo "--- done ---"
+            ls -la dist
+          ' 2>&1 | tee -a "$LOG"
+          RC=${PIPESTATUS[0]}
+          set -e
+          echo "exit code inside termux: $RC" | tee -a "$LOG"
+          if [ "$RC" -ne 0 ] || [ ! -f dist/sw_chat-termux-aarch64 ]; then
+            echo "::error::Сборка под Termux не удалась (rc=$RC), лог в артефакте termux-build-log"
+            echo "failed=build" >> "$GITHUB_OUTPUT"
+            exit 1
           fi
-          ls -la dist
+          ls -la dist | tee -a "$LOG"
+
+      - name: Show failure tail (в аннотацию, логи джоб без admin не читаются)
+        if: failure()
+        run: |
+          if [ -f termux-build.log ]; then
+            TAIL=$(tail -c 1500 termux-build.log | sed ':a;N;$!ba;s/\n/%0A/g')
+            echo "::error title=Termux build tail::$TAIL"
+          fi
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: termux-build-log
+          path: termux-build.log
+          if-no-files-found: warn
 
       - uses: actions/upload-artifact@v4
+        if: success()
         with:
           name: sw_chat-termux-aarch64
           path: dist/sw_chat-termux-aarch64
-          if-no-files-found: warn
+          if-no-files-found: error
 
   release:
     needs: [build, macos, termux]
