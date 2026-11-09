@@ -71,8 +71,38 @@ jobs:
           path: dist/sw_chat-${{ matrix.name }}
           if-no-files-found: error
 
+  termux:
+    # Termux-бинарь собирается в нативном arm64-контейнере Termux.
+    # Если образ недоступен — релиз всё равно выходит, просто без Termux-файла.
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build inside Termux (aarch64)
+        run: |
+          set -e
+          mkdir -p dist
+          if ! docker pull termux/termux-docker:aarch64; then
+            echo "::warning::Образ termux-docker недоступен — Termux-бинарь не собран"
+            exit 0
+          fi
+          docker run --rm -v "$PWD:/src" -w /src termux/termux-docker:aarch64 bash -lc '
+            set -e
+            pkg install -y clang make readline libcurl curl
+            mkdir -p "$HOME/.local/include/nlohmann"
+            curl -fsSL "https://github.com/nlohmann/json/releases/download/v3.11.3/json.hpp" -o "$HOME/.local/include/nlohmann/json.hpp"
+            clang++ -std=c++17 -O2 -I"$HOME/.local/include" -o dist/sw_chat-termux-aarch64 sw_chat.cpp -lreadline -lcurl -lpthread
+          '
+          ls -la dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sw_chat-termux-aarch64
+          path: dist/sw_chat-termux-aarch64
+          if-no-files-found: warn
+
   release:
-    needs: build
+    needs: [build, termux]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:

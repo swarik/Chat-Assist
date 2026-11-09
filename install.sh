@@ -28,6 +28,19 @@ if [ -z "$CXX" ]; then
     fi
 fi
 
+# sudo нужен только для установки пакетов. В "curl | bash" stdin занят скриптом,
+# поэтому без tty и без настроенного sudo пароль спросить негде — тогда пакеты не трогаем.
+SUDO=""
+if [ "$(id -u)" -ne 0 ] && [ "$IS_TERMUX" != "1" ]; then
+    if command -v sudo >/dev/null 2>&1; then
+        if sudo -n true 2>/dev/null; then
+            SUDO="sudo"
+        elif [ -t 0 ]; then
+            SUDO="sudo"
+        fi
+    fi
+fi
+
 echo -e "${CYAN}=== sw_chat installer ===${RESET}"
 
 # ─────────────────────────── Определяем пакетный менеджер ────
@@ -46,28 +59,59 @@ detect_pkg_manager() {
 }
 
 # ─────────────────────────── Установка зависимостей ──────────
+have_build_deps() {
+    command -v "$CXX" >/dev/null 2>&1 || return 1
+    local f found
+    found=0
+    for f in /usr/include/readline/readline.h /usr/local/include/readline/readline.h \
+             "$HOME/.local/include/readline/readline.h"; do
+        [ -f "$f" ] && { found=1; break; }
+    done
+    [ "$found" = 1 ] || return 1
+    found=0
+    for f in /usr/include/curl/curl.h /usr/include/*/curl/curl.h \
+             /usr/local/include/curl/curl.h "$HOME/.local/include/curl/curl.h"; do
+        [ -f "$f" ] && { found=1; break; }
+    done
+    [ "$found" = 1 ] || return 1
+    return 0
+}
+
 install_deps() {
     local pm="$1"
-    echo -e "${YELLOW}[Устанавливаю зависимости...]${RESET}"
     if [ "$IS_TERMUX" = "1" ]; then
-        # Termux: без sudo, имена пакетов свои; заголовки readline/curl в базовых пакетах
+        echo -e "${YELLOW}[Устанавливаю зависимости (Termux)...]${RESET}"
         pkg install -y clang readline libcurl make
         echo -e "${GREEN}[Зависимости (Termux) установлены]${RESET}"
         return
     fi
+    if have_build_deps; then
+        echo -e "${GREEN}[Зависимости уже есть — установку пакетов пропускаю]${RESET}"
+        return
+    fi
+    if [ -z "$SUDO" ] && [ "$(id -u)" -ne 0 ]; then
+        echo -e "${RED}[Не хватает зависимостей, а установить их без пароля нельзя]${RESET}"
+        echo "   Поставьте вручную и запустите снова:"
+        echo "     Debian/Ubuntu: sudo apt-get install -y g++ libreadline-dev libcurl4-openssl-dev"
+        echo "     Fedora/RHEL:   sudo dnf install -y gcc-c++ readline-devel libcurl-devel"
+        echo "     Arch:          sudo pacman -S --noconfirm gcc readline curl"
+        echo "     openSUSE:      sudo zypper install -y gcc-c++ readline-devel libcurl-devel"
+        exit 1
+    fi
+    echo -e "${YELLOW}[Устанавливаю зависимости...]${RESET}"
     case "$pm" in
         apt)
-            apt-get update -qq
-            apt-get install -y g++ libreadline-dev libcurl4-openssl-dev
+            $SUDO apt-get update -qq
+            $SUDO apt-get install -y g++ libreadline-dev libcurl4-openssl-dev
             ;;
         dnf)
-            dnf install -y gcc-c++ readline-devel libcurl-devel
+            $SUDO dnf install -y gcc-c++ readline-devel libcurl-devel
             ;;
         pacman)
-            pacman -Sy --noconfirm gcc readline curl
+            $SUDO pacman -Sy --noconfirm gcc readline curl
             ;;
         zypper)
-            zypper install -y gcc-c++ readline-devel libcurl-devel
+            $SUDO zypper install -y gcc-c++ readline-devel libcurl-devel
             ;;
         *)
             echo -e "${RED}[Неизвестный пакетный менеджер. Установите вручную: g++, libreadline-dev, libcurl-dev]${RESET}"
