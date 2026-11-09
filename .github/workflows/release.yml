@@ -104,61 +104,57 @@ jobs:
           if-no-files-found: warn
 
   termux:
-    # Termux-бинарь собирается в нативном arm64-контейнере Termux.
-    # Джоба НЕОБЯЗАТЕЛЬНАЯ для релиза (continue-on-error), но внутри себя честная:
-    # провал сборки виден как failure, а полный лог кладётся в артефакт termux-build-log,
-    # потому что логи джоб без admin-прав не читаются.
+    # Termux-бинарь в нативном arm64-контейнере Termux. Джоба необязательная для релиза
+    # (continue-on-error), но внутри себя честная: set -e, проверка файла, лог в артефакт
+    # и ключевые строки в аннотацию (логи джоб без admin-прав не читаются).
     runs-on: ubuntu-24.04-arm
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
 
       - name: Build inside Termux (aarch64)
-        id: build
         run: |
           mkdir -p dist
           LOG=termux-build.log
           : > "$LOG"
-          echo "=== docker pull ===" | tee -a "$LOG"
-          if ! docker pull termux/termux-docker:aarch64 2>&1 | tee -a "$LOG"; then
-            echo "::error::Образ termux-docker:aarch64 не скачался"
-            echo "failed=pull" >> "$GITHUB_OUTPUT"
-            exit 1
-          fi
-          echo "=== docker run ===" | tee -a "$LOG"
+          docker pull termux/termux-docker:aarch64 2>&1 | tee -a "$LOG" || {
+            echo "::error::Образ termux-docker:aarch64 не скачался"; exit 1; }
+
           set +e
           docker run --rm -i -v "$PWD:/src" -w /src termux/termux-docker:aarch64 bash -lc '
-            set -x
-            echo "--- pkg update ---"
+            set -e
+            echo "=== df -h ==="
+            df -h / /data 2>/dev/null || df -h
+            echo "=== pkg update ==="
             yes | pkg update -y
-            echo "--- pkg upgrade ---"
-            yes | pkg upgrade -y
-            echo "--- pkg install ---"
+            echo "=== pkg install ==="
             pkg install -y clang make readline libcurl curl
-            echo "--- json.hpp ---"
+            echo "=== which ==="
+            which clang++ curl
+            echo "=== json.hpp ==="
             mkdir -p "$HOME/.local/include/nlohmann"
             curl -fsSL "https://github.com/nlohmann/json/releases/download/v3.11.3/json.hpp" -o "$HOME/.local/include/nlohmann/json.hpp"
-            echo "--- compile ---"
+            echo "=== compile ==="
             clang++ -std=c++17 -O2 -I"$HOME/.local/include" -o dist/sw_chat-termux-aarch64 sw_chat.cpp -lreadline -lcurl -lpthread
-            echo "--- done ---"
-            ls -la dist
+            echo "=== built ==="
+            ls -la dist/sw_chat-termux-aarch64
           ' 2>&1 | tee -a "$LOG"
           RC=${PIPESTATUS[0]}
           set -e
-          echo "exit code inside termux: $RC" | tee -a "$LOG"
-          if [ "$RC" -ne 0 ] || [ ! -f dist/sw_chat-termux-aarch64 ]; then
-            echo "::error::Сборка под Termux не удалась (rc=$RC), лог в артефакте termux-build-log"
-            echo "failed=build" >> "$GITHUB_OUTPUT"
+          echo "termux exit code: $RC" | tee -a "$LOG"
+          if [ "$RC" -ne 0 ] || [ ! -s dist/sw_chat-termux-aarch64 ]; then
+            echo "::error::Сборка под Termux не удалась: rc=$RC, файл $([ -s dist/sw_chat-termux-aarch64 ] && echo есть || echo НЕТ)"
             exit 1
           fi
-          ls -la dist | tee -a "$LOG"
+          ls -la dist
 
-      - name: Show failure tail (в аннотацию, логи джоб без admin не читаются)
+      - name: Show key log lines (аннотация вместо недоступных логов)
         if: failure()
         run: |
           if [ -f termux-build.log ]; then
-            TAIL=$(tail -c 1500 termux-build.log | sed ':a;N;$!ba;s/\n/%0A/g')
-            echo "::error title=Termux build tail::$TAIL"
+            MSG=$(grep -n -E 'error|Error|ERROR|E:|No space|failed|not found|conflict|Unable' termux-build.log | tail -25 | sed ':a;N;$!ba;s/\n/%0A/g')
+            [ -z "$MSG" ] && MSG=$(tail -c 1200 termux-build.log | sed ':a;N;$!ba;s/\n/%0A/g')
+            echo "::error title=Termux key lines::$MSG"
           fi
 
       - name: Upload build log
