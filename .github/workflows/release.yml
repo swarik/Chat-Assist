@@ -115,6 +115,7 @@ jobs:
       - name: Build inside Termux (aarch64)
         run: |
           mkdir -p dist
+          chmod 777 dist
           LOG=termux-build.log
           : > "$LOG"
           docker pull termux/termux-docker:aarch64 2>&1 | tee -a "$LOG" || {
@@ -136,9 +137,11 @@ jobs:
             mkdir -p "$HOME/.local/include/nlohmann"
             curl -fsSL "https://github.com/nlohmann/json/releases/download/v3.11.3/json.hpp" -o "$HOME/.local/include/nlohmann/json.hpp"
             echo "=== compile ==="
-            clang++ -std=c++17 -O2 -I"$HOME/.local/include" -o dist/sw_chat-termux-aarch64 sw_chat.cpp -lreadline -lcurl -lpthread
-            echo "=== built ==="
-            ls -la dist/sw_chat-termux-aarch64
+            clang++ -std=c++17 -O2 -I"$HOME/.local/include" -o "$HOME/sw_chat-termux-aarch64" sw_chat.cpp -lreadline -lcurl -lpthread
+            echo "=== built, copy out ==="
+            ls -la "$HOME/sw_chat-termux-aarch64"
+            cp "$HOME/sw_chat-termux-aarch64" /src/dist/sw_chat-termux-aarch64
+            ls -la /src/dist/sw_chat-termux-aarch64
           ' 2>&1 | tee -a "$LOG"
           RC=${PIPESTATUS[0]}
           set -e
