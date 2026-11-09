@@ -23,10 +23,6 @@ jobs:
             name: linux-aarch64
             pm: apt
             deps: g++ libreadline-dev libcurl4-openssl-dev
-          - os: macos-14
-            name: macos-arm64
-            pm: brew
-            deps: readline curl
     steps:
       - uses: actions/checkout@v4
 
@@ -71,6 +67,42 @@ jobs:
           path: dist/sw_chat-${{ matrix.name }}
           if-no-files-found: error
 
+  macos:
+    # macOS-раннеры GitHub периодически не выделяются (runner_id=0, джоба отменяется
+    # за секунду без единого шага). Это внешняя причина, не наш код, поэтому джоба
+    # необязательная: релиз выходит с linux-бинарями, macOS добавляется когда раннер дают.
+    runs-on: macos-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: brew install readline curl
+
+      - name: Fetch nlohmann/json
+        run: |
+          mkdir -p "$HOME/.local/include/nlohmann"
+          curl -fsSL "https://github.com/nlohmann/json/releases/download/v3.11.3/json.hpp" \
+               -o "$HOME/.local/include/nlohmann/json.hpp"
+
+      - name: Build
+        run: |
+          set -e
+          RL="$(brew --prefix readline)"
+          CU="$(brew --prefix curl)"
+          mkdir -p dist
+          g++ -std=c++17 -O2 -I"$HOME/.local/include" -I"$RL/include" -I"$CU/include" \
+              -o dist/sw_chat-macos-arm64 sw_chat.cpp \
+              -L"$RL/lib" -L"$CU/lib" -lreadline -lcurl -lpthread
+          strip dist/sw_chat-macos-arm64 || true
+          ls -la dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sw_chat-macos-arm64
+          path: dist/sw_chat-macos-arm64
+          if-no-files-found: warn
+
   termux:
     # Termux-бинарь собирается в нативном arm64-контейнере Termux.
     # Джоба НЕОБЯЗАТЕЛЬНАЯ: образ termux-docker старый, зеркала Termux переезжают,
@@ -110,8 +142,11 @@ jobs:
           if-no-files-found: warn
 
   release:
-    needs: [build, termux]
-    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build, macos, termux]
+    # continue-on-error не спасает от статуса cancelled (macOS-раннер отменяют за секунду).
+    # Поэтому условие явное: релиз выходит, если ОБЯЗАТЕЛЬНЫЕ linux-сборки прошли,
+    # а необязательные (macos, termux) могут быть в любом состоянии.
+    if: always() && startsWith(github.ref, 'refs/tags/v') && needs.build.result == 'success'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
