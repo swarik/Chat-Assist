@@ -73,26 +73,34 @@ jobs:
 
   termux:
     # Termux-бинарь собирается в нативном arm64-контейнере Termux.
-    # Если образ недоступен — релиз всё равно выходит, просто без Termux-файла.
+    # Джоба НЕОБЯЗАТЕЛЬНАЯ: образ termux-docker старый, зеркала Termux переезжают,
+    # сборка может упасть по внешним причинам. continue-on-error гарантирует,
+    # что релиз выйдет без Termux-файла, а не будет отменён целиком.
     runs-on: ubuntu-24.04-arm
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
 
       - name: Build inside Termux (aarch64)
         run: |
-          set -e
           mkdir -p dist
           if ! docker pull termux/termux-docker:aarch64; then
             echo "::warning::Образ termux-docker недоступен — Termux-бинарь не собран"
             exit 0
           fi
-          docker run --rm -v "$PWD:/src" -w /src termux/termux-docker:aarch64 bash -lc '
+          # pkg в образе требует обновления индексов; -i нужен, т.к. pkg иногда ждёт TTY.
+          if ! docker run --rm -i -v "$PWD:/src" -w /src termux/termux-docker:aarch64 bash -lc '
             set -e
+            yes | pkg update -y || true
+            yes | pkg upgrade -y || true
             pkg install -y clang make readline libcurl curl
             mkdir -p "$HOME/.local/include/nlohmann"
             curl -fsSL "https://github.com/nlohmann/json/releases/download/v3.11.3/json.hpp" -o "$HOME/.local/include/nlohmann/json.hpp"
             clang++ -std=c++17 -O2 -I"$HOME/.local/include" -o dist/sw_chat-termux-aarch64 sw_chat.cpp -lreadline -lcurl -lpthread
-          '
+          '; then
+            echo "::warning::Сборка под Termux не удалась (внешняя причина) — релиз выходит без этого файла"
+            exit 0
+          fi
           ls -la dist
 
       - uses: actions/upload-artifact@v4
@@ -110,6 +118,7 @@ jobs:
         with:
           path: artifacts
           merge-multiple: true
+          # Termux-артефакта может не быть — это не повод валить релиз.
 
       - name: Checksums
         run: |
