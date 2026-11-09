@@ -129,8 +129,9 @@ jobs:
             yes | pkg update -y
             echo "=== pkg install ==="
             pkg install -y clang make readline libcurl curl
-            echo "=== which ==="
-            which clang++ curl
+            echo "=== tool check ==="
+            command -v clang++ || { echo "clang++ НЕТ"; exit 1; }
+            command -v curl || { echo "curl НЕТ"; exit 1; }
             echo "=== json.hpp ==="
             mkdir -p "$HOME/.local/include/nlohmann"
             curl -fsSL "https://github.com/nlohmann/json/releases/download/v3.11.3/json.hpp" -o "$HOME/.local/include/nlohmann/json.hpp"
