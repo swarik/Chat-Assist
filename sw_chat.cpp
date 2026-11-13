@@ -38,7 +38,7 @@
 
 using json = nlohmann::json;
 // ─────────────────────────── Версия ───────────────────────────
-#define APP_VERSION "1.4.85"
+#define APP_VERSION "1.4.86"
 
 
 // Emoji_Presentation: всегда отображается как emoji (ширина 2)
@@ -3091,6 +3091,37 @@ std::string do_api_request(bool &aborted) {
     }
     bool ok = do_attempt(G.model, state.full_content, http_code, res);
 
+    // FIX(1.4.86): пустой content при finish_reason=stop. Модель обрывается,
+    // не выдав ответа (наблюдалось ~2.5% запросов deepseek/deepseek-v4.1-flash-1017:
+    // content=null, reasoning_content=обрывок мысли). Повторяем запрос,
+    // прежде чем показать ошибку. Прерывание пользователем уважаем.
+    for (int empty_try = 0; ok && http_code == 200 && empty_try < 2; ++empty_try) {
+        bool empty_answer = false;
+        try {
+            json ej = json::parse(state.full_content, nullptr, false);
+            if (!ej.is_discarded() && ej.contains("choices") && !ej["choices"].empty()) {
+                auto& em = ej["choices"][0]["message"];
+                if (em.contains("content")) {
+                    const auto& ec = em["content"];
+                    if (ec.is_null()) empty_answer = true;
+                    else if (ec.is_string() && ec.get<std::string>().empty()) empty_answer = true;
+                } else {
+                    empty_answer = true;
+                }
+            }
+        } catch (...) {}
+        if (!empty_answer) break;
+        if (g_stream_abort) break;
+        if (!is_compact())
+            std::cout << C_YELLOW << "[Пустой ответ модели, повтор "
+                      << (empty_try + 1) << "/2...]" << C_RESET << std::endl;
+        std::string retry_body; long retry_hc = 0; CURLcode retry_cr = CURLE_OK;
+        if (!do_attempt(G.model, retry_body, retry_hc, retry_cr)) break;
+        if (retry_hc != 200) break;
+        state.full_content = retry_body;
+        http_code = retry_hc; res = retry_cr;
+    }
+
     std::string used_model = G.model;
     if (!ok && !g_stream_abort &&
         (http_code == 429 || (http_code >= 500 && http_code < 600))) {
@@ -3385,13 +3416,27 @@ void process_response(const std::string &content_in, bool aborted, size_t msgs_b
     struct BBlock { size_t tag_s, code_s, code_e, blk_e; std::string code; };
     auto find_bash_blocks = [&](const std::string &text) {
         std::vector<BBlock> bbs;
+        // FIX(think-exec): регионы ```think ... ``` заменяем пробелами в копии.
+        // Смещения сохраняются 1:1, поэтому блоки ищутся по оригиналу, но примеры
+        // bash-блоков ВНУТРИ рассуждения больше не выполняются.
+        std::string scan = text;
+        {
+            size_t p = 0;
+            while ((p = scan.find("```think", p)) != std::string::npos) {
+                size_t e = scan.find("```", p + 8);
+                size_t stop = (e == std::string::npos) ? scan.size() : (e + 3);
+                for (size_t k = p; k < stop && k < scan.size(); ++k) scan[k] = 32;
+                if (e == std::string::npos) break;
+                p = e + 3;
+            }
+        }
         size_t pos = 0;
         while (pos < text.size()) {
-            auto ts = text.find("```", pos);
+            auto ts = scan.find("```", pos);
             if (ts == std::string::npos) break;
             size_t cs = 0;
-            if (!is_exec_fence(text, ts, cs)) { pos = ts + 3; continue; }
-            auto ce = find_closing(text, cs);
+            if (!is_exec_fence(scan, ts, cs)) { pos = ts + 3; continue; }
+            auto ce = find_closing(scan, cs);
             if (ce == std::string::npos) break;
             auto be = ce + 3;
             if (be < text.size() && text[be] == '\n') be++;
