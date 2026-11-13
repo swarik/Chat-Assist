@@ -3542,6 +3542,17 @@ void process_response(const std::string &content_in, bool aborted, size_t msgs_b
         bool chain_aborted = false;
         std::string next = do_api_request(chain_aborted);
         strip_think(next, G.think);
+        // FIX(1.4.86-patch): обрыв цепочки на сетевом сбое или пустом ответе.
+        // Раньше после одной неудачи клиент выходил в приглашение, и ход
+        // выглядел оборванным на полуслове. Повторяем запрос с паузой.
+        for (int api_try = 0; next.empty() && !chain_aborted && api_try < 2; ++api_try) {
+            if (!is_compact())
+                std::cout << C_YELLOW << "[Ответ не получен, повтор "
+                          << (api_try + 1) << "/2...]" << C_RESET << std::endl;
+            std::this_thread::sleep_for(std::chrono::seconds(3));
+            next = do_api_request(chain_aborted);
+            strip_think(next, G.think);
+        }
         if (next.empty()) {
             // API не ответил — оставляем результат bash в контексте,
             // чтобы модель увидела его при следующем запросе (не теряем вывод).
