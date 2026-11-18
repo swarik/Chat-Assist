@@ -38,7 +38,7 @@
 
 using json = nlohmann::json;
 // ─────────────────────────── Версия ───────────────────────────
-#define APP_VERSION "1.4.91"
+#define APP_VERSION "1.4.92"
 
 
 // Emoji_Presentation: всегда отображается как emoji (ширина 2)
@@ -2901,6 +2901,32 @@ static std::string strip_ds_safety(const std::string& in) {
     return out.substr(b, e - b + 1);
 }
 
+// Маркер тишины: ТОЛЬКО строка-комментарий "# <маркер>" после ведущих пробелов.
+// Раньше искали подстроку во всём коде блока: grep по истории с этим словом
+// глушил вывод и выглядел как "вывод сломался".
+static bool has_nochain_marker(const std::string& code) {
+    const std::string mk = "NO" "CHAIN";
+    size_t pos = 0;
+    while (pos <= code.size()) {
+        size_t nl = code.find('\n', pos);
+        size_t end = (nl == std::string::npos) ? code.size() : nl;
+        size_t b = pos;
+        while (b < end && (code[b] == ' ' || code[b] == '\t')) ++b;
+        if (b < end && code[b] == '#') {
+            ++b;
+            while (b < end && (code[b] == ' ' || code[b] == '\t')) ++b;
+            if (end - b >= mk.size() && code.compare(b, mk.size(), mk) == 0) {
+                size_t after = b + mk.size();
+                if (after == end || !(std::isalnum(static_cast<unsigned char>(code[after])) || code[after] == '_'))
+                    return true;
+            }
+        }
+        if (nl == std::string::npos) break;
+        pos = nl + 1;
+    }
+    return false;
+}
+
 std::string do_api_request(bool &aborted) {
     aborted = false;
     std::string api_key = get_api_key();
@@ -3525,7 +3551,6 @@ void process_response(const std::string &content_in, bool aborted, size_t msgs_b
         while (!t.empty() && (t.back() == '\n' || t.back() == '\r' || t.back() == ' ')) t.pop_back();
         
         auto bbs = find_bash_blocks(t);
-{ FILE* _f=fopen("/home/sw/tmp/render_trace.log","a"); if(_f){ fprintf(_f,"[%s] render: blocks=%zu textlen=%zu\n", moscow_now_str().c_str(), bbs.size(), t.size()); fclose(_f);} }
         if (bbs.empty()) {
             print_assistant_text(t);
             return "";
@@ -3563,10 +3588,8 @@ void process_response(const std::string &content_in, bool aborted, size_t msgs_b
             // Выполняем (флаг chain_autorun общий для всей цепочки)
             // NOCHAIN: маркер в коде блока — выполнить и НЕ отправлять результат
             // модели. Нужно для голосового режима: say отзвучал -> сразу приглашение.
-            bool nochain = (bbs[i].code.find("NOCHAIN") != std::string::npos);
-{ FILE* _f=fopen("/home/sw/tmp/render_trace.log","a"); if(_f){ fprintf(_f,"[%s] exec block %d/%d codelen=%zu\n", moscow_now_str().c_str(), i+1, total, bbs[i].code.size()); fclose(_f);} }
+            bool nochain = has_nochain_marker(bbs[i].code);
             std::string res = execute_single_bash(bbs[i].code, i, total, chain_autorun);
-{ FILE* _f=fopen("/home/sw/tmp/render_trace.log","a"); if(_f){ fprintf(_f,"[%s] res len=%zu nochain=%d\n", moscow_now_str().c_str(), res.size(), (int)nochain); fclose(_f);} }
             if (nochain) { nochain_hit = true; cur = t.size(); break; }
             if (!res.empty()) {
                 if (!combined_result.empty()) combined_result += "\n---\n";
@@ -3581,7 +3604,6 @@ void process_response(const std::string &content_in, bool aborted, size_t msgs_b
             leftover = t.substr(cur);
         }
         if (!is_compact() && !G.fire) std::cout << std::endl;
-{ FILE* _f=fopen("/home/sw/tmp/render_trace.log","a"); if(_f){ fprintf(_f,"[%s] render done combined=%zu nochain_hit=%d\n", moscow_now_str().c_str(), combined_result.size(), (int)nochain_hit); fclose(_f);} }
         return combined_result;
     };
 
