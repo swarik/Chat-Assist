@@ -38,7 +38,7 @@
 
 using json = nlohmann::json;
 // ─────────────────────────── Версия ───────────────────────────
-#define APP_VERSION "1.4.87"
+#define APP_VERSION "1.4.91"
 
 
 // Emoji_Presentation: всегда отображается как emoji (ширина 2)
@@ -215,6 +215,9 @@ static std::string get_home_dir() {
 // Networking / API / runtime constants (named magic numbers)
 #define CURL_TOTAL_TIMEOUT_S      420L
 #define CURL_CONNECT_TIMEOUT_S    15L
+// Сервер может ответить 100 Continue и замолчать: общий таймаут 420 с
+// означал бы «висит, пока не нажмут Ctrl+C». Рвём по тишине.
+#define CURL_STALL_TIMEOUT_S      90L
 #define API_MAX_RETRIES           3
 #define API_RETRY_BACKOFF_S       2
 #define API_MAX_RETRY_AFTER_S     60
@@ -2854,6 +2857,50 @@ static json compatible_model_request(json j, int stage,
     return j;
 }
 
+// DUMP-ALL: сырой ответ API пишем при ЛЮБОМ исходе (curl error, не-200,
+// прерывание), не только при 200. Иначе рецидив пустого вывода уходит без следа.
+static void dump_raw_any(const std::string& body, long http_code, const char* tag) {
+    if (!G.debug_raw) return;
+    try {
+        std::ofstream df(get_home_dir() + "/tmp/api_raw.json");
+        if (df.is_open()) {
+            df << "{\"_tag\":\"" << tag << "\",\"_http\":" << http_code
+               << ",\"_body\":";
+            json bj = json::parse(body, nullptr, false);
+            if (bj.is_discarded()) df << json(body).dump();
+            else df << bj.dump();
+            df << "}";
+            df.close();
+        }
+    } catch (...) {}
+}
+
+// 302.ai подмешивает в content свой блок модерации:
+//   <ds_safety>[用户未成年]否 ... [规则]无</ds_safety>Safe
+// В терминале без CJK-шрифта он рисуется ромбами, а иногда занимает весь ответ.
+// Вырезаем блок целиком и слово Safe сразу за ним; остальное не трогаем.
+static std::string strip_ds_safety(const std::string& in) {
+    if (in.find("<ds_safety>") == std::string::npos) return in;
+    std::string out;
+    out.reserve(in.size());
+    size_t pos = 0;
+    while (pos < in.size()) {
+        size_t ts = in.find("<ds_safety>", pos);
+        if (ts == std::string::npos) { out.append(in, pos, std::string::npos); break; }
+        out.append(in, pos, ts - pos);
+        size_t te = in.find("</ds_safety>", ts);
+        if (te == std::string::npos) break;              // блок не закрыт — режем до конца
+        size_t after = te + 12;                          // длина "</ds_safety>"
+        if (in.compare(after, 4, "Safe") == 0) after += 4;
+        pos = after;
+    }
+    // Схлопываем пустоту, оставшуюся от вырезанного блока.
+    size_t b = out.find_first_not_of(" \t\r\n");
+    if (b == std::string::npos) return "";
+    size_t e = out.find_last_not_of(" \t\r\n");
+    return out.substr(b, e - b + 1);
+}
+
 std::string do_api_request(bool &aborted) {
     aborted = false;
     std::string api_key = get_api_key();
@@ -2899,6 +2946,9 @@ std::string do_api_request(bool &aborted) {
             curl_slist_append(nullptr, "Content-Type: application/json");
         std::string auth = "Authorization: Bearer " + api_key;
         raw = curl_slist_append(raw, auth.c_str());
+        // FIX(1.4.91): без этого curl ждёт 100-continue до секунды и сервер
+        // успевает ответить 100 и замолчать.
+        raw = curl_slist_append(raw, "Expect:");
         headers_owner.reset(raw);
     }
     struct curl_slist *headers = headers_owner.get();
@@ -2990,6 +3040,10 @@ std::string do_api_request(bool &aborted) {
             curl_easy_setopt(curl, CURLOPT_HEADERDATA, &st);
             curl_easy_setopt(curl, CURLOPT_TIMEOUT, CURL_TOTAL_TIMEOUT_S);
             curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, CURL_CONNECT_TIMEOUT_S);
+            // FIX(1.4.91): тишина в сокете дольше CURL_STALL_TIMEOUT_S = обрыв,
+            // а не ожидание до общего таймаута.
+            curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1L);
+            curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, CURL_STALL_TIMEOUT_S);
             curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
             // Включаем progress-колбэк — он позволяет прервать запрос
             // по Ctrl+C ещё до прихода первых байт ответа.
@@ -3152,12 +3206,14 @@ std::string do_api_request(bool &aborted) {
     { std::lock_guard<std::mutex> lock(g_stream_mutex); if (g_stream_abort) { was_aborted = true; g_stream_abort = 0; } }
     if (was_aborted) {
         aborted = true;
+        dump_raw_any(state.full_content, http_code, "aborted");
         inflight_clear();   // прервано пользователем — не потеря, журнал закрываем
         if (!is_compact()) std::cout << "\n" << C_YELLOW << "[Запрос прерван]" << C_RESET << std::endl;
         return "";
     }
-    if (res != CURLE_OK) { std::cerr << C_RED << "curl: " << curl_easy_strerror(res) << C_RESET << std::endl; return ""; }
+    if (res != CURLE_OK) { dump_raw_any(state.full_content, http_code, "curl_error"); std::cerr << C_RED << "curl: " << curl_easy_strerror(res) << C_RESET << std::endl; return ""; }
     if (http_code != 200) {
+        dump_raw_any(state.full_content, http_code, "http_non200");
         std::cerr << C_RED << "[HTTP " << http_code << "] "
                   << state.full_content.substr(0, 300) << C_RESET << std::endl;
         if (state.full_content.find("-10003") != std::string::npos)
@@ -3302,6 +3358,11 @@ std::string do_api_request(bool &aborted) {
     }
     
     inflight_mark("received");
+    state.full_content = strip_ds_safety(state.full_content);
+    // Если от ответа остался только блок модерации — говорим прямо, а не молчим:
+    // пустая строка здесь означала бы тишину и незакрытый журнал.
+    if (state.full_content.empty())
+        state.full_content = "[Ответ API: пришёл только блок модерации 302.ai, текста нет]";
     return sanitize_utf8(state.full_content);
 }
 
@@ -3383,10 +3444,11 @@ void process_response(const std::string &content_in, bool aborted, size_t msgs_b
             auto p = text.find("```", pos);
             if (p == std::string::npos) return std::string::npos;
             auto after = p + 3;
-            if (after >= text.size() || text[after] == '\n' ||
-                text[after] == '\r'  || text[after] == ' ') {
-                return p;
-            }
+            if (after >= text.size()) return p;
+            unsigned char c = static_cast<unsigned char>(text[after]);
+            bool word = (c == '_') || (c >= '0' && c <= '9') ||
+                        (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+            if (!word) return p;
             pos = p + 3;
         }
         return std::string::npos;
@@ -3463,6 +3525,7 @@ void process_response(const std::string &content_in, bool aborted, size_t msgs_b
         while (!t.empty() && (t.back() == '\n' || t.back() == '\r' || t.back() == ' ')) t.pop_back();
         
         auto bbs = find_bash_blocks(t);
+{ FILE* _f=fopen("/home/sw/tmp/render_trace.log","a"); if(_f){ fprintf(_f,"[%s] render: blocks=%zu textlen=%zu\n", moscow_now_str().c_str(), bbs.size(), t.size()); fclose(_f);} }
         if (bbs.empty()) {
             print_assistant_text(t);
             return "";
@@ -3473,6 +3536,7 @@ void process_response(const std::string &content_in, bool aborted, size_t msgs_b
 
         std::string combined_result;
         size_t cur = 0;
+        bool nochain_hit = false;
         int total = static_cast<int>(bbs.size());
         // chain_autorun захвачен снаружи по ссылке (см. объявление выше).
 
@@ -3497,7 +3561,13 @@ void process_response(const std::string &content_in, bool aborted, size_t msgs_b
             std::cout << std::flush;
 
             // Выполняем (флаг chain_autorun общий для всей цепочки)
+            // NOCHAIN: маркер в коде блока — выполнить и НЕ отправлять результат
+            // модели. Нужно для голосового режима: say отзвучал -> сразу приглашение.
+            bool nochain = (bbs[i].code.find("NOCHAIN") != std::string::npos);
+{ FILE* _f=fopen("/home/sw/tmp/render_trace.log","a"); if(_f){ fprintf(_f,"[%s] exec block %d/%d codelen=%zu\n", moscow_now_str().c_str(), i+1, total, bbs[i].code.size()); fclose(_f);} }
             std::string res = execute_single_bash(bbs[i].code, i, total, chain_autorun);
+{ FILE* _f=fopen("/home/sw/tmp/render_trace.log","a"); if(_f){ fprintf(_f,"[%s] res len=%zu nochain=%d\n", moscow_now_str().c_str(), res.size(), (int)nochain); fclose(_f);} }
+            if (nochain) { nochain_hit = true; cur = t.size(); break; }
             if (!res.empty()) {
                 if (!combined_result.empty()) combined_result += "\n---\n";
                 if (total > 1) combined_result += "[Блок " + std::to_string(i+1) + "]:\n";
@@ -3507,10 +3577,11 @@ void process_response(const std::string &content_in, bool aborted, size_t msgs_b
         }
 
         // Текст после последнего блока — НЕ рендерим, сохраняем как leftover
-        if (cur < t.size()) {
+        if (!nochain_hit && cur < t.size()) {
             leftover = t.substr(cur);
         }
         if (!is_compact() && !G.fire) std::cout << std::endl;
+{ FILE* _f=fopen("/home/sw/tmp/render_trace.log","a"); if(_f){ fprintf(_f,"[%s] render done combined=%zu nochain_hit=%d\n", moscow_now_str().c_str(), combined_result.size(), (int)nochain_hit); fclose(_f);} }
         return combined_result;
     };
 
@@ -4322,7 +4393,8 @@ static void print_models_list(const std::vector<std::string>& list,
     int total = static_cast<int>(list.size());
     int pages = (total + page_sz - 1) / page_sz;
     if (pages < 1) pages = 1;
-    if (page < 1) page = 1;
+    if (page == 0) page = pages;            // 0 = последняя страница (после refresh)
+    else if (page < 1) page = 1;
     if (page > pages) page = pages;
     int start = (page - 1) * page_sz;
     int end = std::min(total, start + page_sz);
@@ -4374,6 +4446,7 @@ static void cmd_models(const std::string& arg) {
     // tokens: refresh|cache|pN|filter words
     std::string filter;
     int page = 1;
+    bool page_explicit = false;
     bool do_refresh = false, do_cache = false;
     {
         std::istringstream ss(a);
@@ -4383,9 +4456,9 @@ static void cmd_models(const std::string& arg) {
             if (tl == "refresh" || tl == "live" || tl == "update" || tl == "force") do_refresh = true;
             else if (tl == "cache") do_cache = true;
             else if (tl.size() >= 2 && (tl[0] == 'p' || tl[0] == 'P') && std::isdigit(static_cast<unsigned char>(tl[1]))) {
-                try { page = std::stoi(tl.substr(1)); } catch (...) {}
+                try { page = std::stoi(tl.substr(1)); page_explicit = true; } catch (...) {}
             } else if (tl == "page" || tl == "pg") {
-                std::string n; if (ss >> n) { try { page = std::stoi(n); } catch (...) {} }
+                std::string n; if (ss >> n) { try { page = std::stoi(n); page_explicit = true; } catch (...) {} }
             } else {
                 if (!filter.empty()) filter += " ";
                 filter += tok;
@@ -4395,6 +4468,7 @@ static void cmd_models(const std::string& arg) {
 
     if (do_refresh) {
         refresh_models_from_api(true, false);
+        if (!page_explicit) page = 0;       // свежие модели в конце списка
     } else if (do_cache) {
         if (!load_models_cache()) {
             std::cout << C_YELLOW << "[models] empty cache, using defaults" << C_RESET << std::endl;
